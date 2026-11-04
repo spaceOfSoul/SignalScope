@@ -1,0 +1,326 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>vscope core tests</title></head>
+<body><pre id="out">running...</pre>
+<script src="../lib/fengari-web.js"></script>
+<script src="../js/util.js"></script>
+<script src="../js/signal.js"></script>
+<script src="../js/board.js"></script>
+<script src="../js/vfs.js"></script>
+<script src="../js/lua_prelude.js"></script>
+<script src="../js/lua_runtime.js"></script>
+<script src="../js/scope.js"></script>
+<script src="../js/sim.js"></script>
+<script src="../js/examples.js"></script>
+<script>
+(function () {
+const out = [];
+let pass = 0, fail = 0;
+function ok(cond, name, extra) { if (cond) { pass++; out.push('PASS ' + name + (extra ? '  [' + extra + ']' : '')); } else { fail++; out.push('FAIL ' + name + (extra ? '  [' + extra + ']' : '')); } }
+function near(a, b, tol, name) { const d = Math.abs(a - b); ok(d <= tol, name, 'got ' + a + ' exp ' + b + ' |d|=' + d.toExponential(2)); }
+const S = VS.signal, B = VS.board;
+const ONLY = (location.hash || '').replace('#', '');
+function sec(n) { const r = !ONLY || ONLY.split(',').indexOf(String(n)) >= 0; if (r) console.log('SECTION ' + n); return r; }
+try {
+  // ---------- 1. Chain vs RK4 ----------
+  function rk4(stages, u, x, h, steps) {
+    const n = stages.length, dtt = h / steps;
+    const f = (xx) => { const d = new Float64Array(n); let w = u; for (let i = 0; i < n; i++) { d[i] = (w - xx[i]) / stages[i].tau; w = stages[i].type === 'HPF' ? w - xx[i] : xx[i]; } return d; };
+    let X = Float64Array.from(x);
+    for (let s = 0; s < steps; s++) {
+      const k1 = f(X), x2 = X.map((v, i) => v + k1[i] * dtt / 2), k2 = f(x2), x3 = X.map((v, i) => v + k2[i] * dtt / 2), k3 = f(x3), x4 = X.map((v, i) => v + k3[i] * dtt), k4 = f(x4);
+      X = X.map((v, i) => v + dtt / 6 * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]));
+    }
+    return X;
+  }
+  if (sec(1)) for (const cfg of [[{ type: 'LPF', tau: 1e-3 }], [{ type: 'HPF', tau: 1e-3 }], [{ type: 'LPF', tau: 1e-4 }, { type: 'HPF', tau: 0.0159 }], [{ type: 'HPF', tau: 2e-4 }, { type: 'HPF', tau: 0.0159 }], [{ type: 'LPF', tau: 1e-3 }, { type: 'HPF', tau: 1e-3 }]]) {
+    const ch = new S.Chain(cfg), x = new Float64Array(cfg.length).map((_, i) => 0.3 * i - 0.1);
+    const x0 = Float64Array.from(x);
+    ch.step(3.3, x, 1.7e-3);
+    const r = rk4(cfg, 3.3, x0, 1.7e-3, 20000);
+    let md = 0; for (let i = 0; i < x.length; i++) md = Math.max(md, Math.abs(x[i] - r[i]));
+    ok(md < 2e-6, 'Chain.step vs RK4 ' + cfg.map(c => c.type + c.tau).join('+'), 'maxdiff ' + md.toExponential(2));
+  }
+  // ---------- 2. PWM period jump vs brute force ----------
+  if (sec(2)) {
+    const ch = new S.Chain([{ type: 'LPF', tau: 2e-4 }, { type: 'HPF', tau: 0.0159 }]);
+    const r = S.rawPWM(0.00013, 1e-5, 3e-6, 3.3, 0);
+    const bp = { t: 0.0001, raw: r, chain: ch, x: Float64Array.from([0.5, 0.2]), _pwm: null };
+    const tq = 0.0001 + 0.0123456;
+    const xa = new Float64Array(2); S.stateAt(bp, tq, xa);
+    // brute force: 모든 엣지를 나열해 반주기 단위로 적분
+    const xb = Float64Array.from(bp.x); let t = bp.t;
+    const edges = [];
+    for (let k = Math.floor((t - r.t0) / r.T) - 1; ; k++) {
+      const e1 = r.t0 + k * r.T, e2 = e1 + r.Th;
+      if (e1 > t && e1 < tq) edges.push(e1);
+      if (e2 > t && e2 < tq) edges.push(e2);
+      if (e1 > tq) break;
+    }
+    edges.sort((p, q) => p - q); edges.push(tq);
+    for (const e of edges) { ch.step(S.rawRight(r, (t + e) / 2), xb, e - t); t = e; }
+    near(xa[0], xb[0], 1e-9, 'PWM stateAt period-jump (LPF state)');
+    near(xa[1], xb[1], 1e-9, 'PWM stateAt period-jump (AC state)');
+  }
+  // ---------- 3. Timeline sample on PWM+LPF ----------
+  if (sec(3)) {
+    const ch = new S.Chain([{ type: 'LPF', tau: 5e-5 }]);
+    const tl = new S.Timeline();
+    tl.push(0, S.rawConst(0), ch, new Float64Array(1));
+    tl.push(1e-4, S.rawPWM(1e-4, 1e-4, 2.5e-5, 3.3, 0), ch);
+    const N = 2000, dt = 1e-6, ta = 0.5e-4;
+    const out1 = new Float64Array(N); tl.sample(ta, dt, N, out1);
+    // brute force eval
+    let md = 0;
+    for (let j = 0; j < N; j += 37) {
+      const t = ta + j * dt;
+      const v = tl.valueAt(t);
+      md = Math.max(md, Math.abs(v - out1[j]));
+    }
+    ok(md < 1e-9, 'Timeline.sample consistent with valueAt', md.toExponential(2));
+    // analytic check: first rising at 1e-4 from 0 → at t=1e-4+2e-5: 3.3(1-e^{-0.4})
+    const v = tl.valueAt(1e-4 + 2e-5);
+    near(v, 3.3 * (1 - Math.exp(-0.4)), 1e-9, 'LPF charge analytic');
+  }
+  // ---------- 4. findCrossing ----------
+  if (sec(4)) {
+    const ch0 = new S.Chain([]);
+    const tl = new S.Timeline();
+    tl.push(0, S.rawConst(0), ch0, new Float64Array(0));
+    tl.push(1e-3, S.rawPWM(1e-3, 1e-5, 2e-6, 3.3, 0), ch0);
+    near(tl.findCrossing(0, 1, 1.65, true), 1e-3, 1e-15, 'cross: PWM start jump');
+    near(tl.findCrossing(1e-3, 1, 1.65, true), 1e-3 + 1e-5, 1e-12, 'cross: next rising edge');
+    near(tl.findCrossing(1e-3, 1, 1.65, false), 1e-3 + 2e-6, 1e-12, 'cross: falling edge');
+    ok(tl.findCrossing(0, 1, 4, true) < 0, 'cross: level above signal -> none');
+    // LPF step
+    const ch1 = new S.Chain([{ type: 'LPF', tau: 1e-3 }]);
+    const tl2 = new S.Timeline();
+    tl2.push(0, S.rawConst(0), ch1, new Float64Array(1));
+    tl2.push(2e-3, S.rawConst(3.3), ch1);
+    near(tl2.findCrossing(0, 1, 1.0, true), 2e-3 + 1e-3 * Math.log(3.3 / 2.3), 1e-12, 'cross: LPF exponential analytic');
+    // HPF jump
+    const ch2 = new S.Chain([{ type: 'HPF', tau: 1e-3 }]);
+    const tl3 = new S.Timeline();
+    tl3.push(0, S.rawConst(0), ch2, new Float64Array(1));
+    tl3.push(2e-3, S.rawConst(3.3), ch2);
+    near(tl3.findCrossing(0, 1, 1.0, true), 2e-3, 1e-15, 'cross: HPF rising jump');
+    near(tl3.findCrossing(2e-3, 1, 1.0, false), 2e-3 + 1e-3 * Math.log(3.3 / 1.0), 1e-12, 'cross: HPF decay falling');
+    // PWM + LPF ramp (many periods): brute force fine sampling
+    const ch3 = new S.Chain([{ type: 'LPF', tau: 2e-3 }]);
+    const tl4 = new S.Timeline();
+    tl4.push(0, S.rawConst(0), ch3, new Float64Array(1));
+    tl4.push(1e-4, S.rawPWM(1e-4, 1e-5, 5e-6, 3.3, 0), ch3);
+    const tc = tl4.findCrossing(0, 0.1, 1.5, true);
+    // brute-force: find first time value >= 1.5 with dt 1e-8 around
+    let tb = -1;
+    { const N = 200000, dtt = 5e-8; const buf = new Float64Array(N); tl4.sample(1e-4, dtt, N, buf); for (let i = 1; i < N; i++) if (buf[i - 1] < 1.5 && buf[i] >= 1.5) { tb = 1e-4 + i * dtt; break; } }
+    near(tc, tb, 1e-7, 'cross: PWM+LPF ramp (~' + Math.round((tc - 1e-4) / 1e-5) + ' periods)');
+    // AC coupled PWM, level 0 rising -> every period
+    const ch4 = new S.Chain([{ type: 'HPF', tau: 0.0159 }]);
+    const tl5 = new S.Timeline();
+    const r5 = S.rawPWM(0, 1e-3, 2.5e-4, 3.3, 0);
+    const x5 = new Float64Array(1); ch4.equilibrium(S.rawAverage(r5), x5);
+    tl5.push(0, r5, ch4, x5);
+    const t5 = tl5.findCrossing(0.5005, 1, 0, true);
+    near(t5, 0.501, 1e-12, 'cross: AC-coupled PWM rising through 0');
+    // long skip-ahead: PWM 1MHz + LPF tau 10ms, level near final
+    const ch6 = new S.Chain([{ type: 'LPF', tau: 1e-2 }]);
+    const tl6 = new S.Timeline();
+    tl6.push(0, S.rawConst(0), ch6, new Float64Array(1));
+    tl6.push(0, S.rawPWM(0, 1e-6, 5e-7, 3.3, 0), ch6);
+    const t6 = tl6.findCrossing(0, 1, 1.0, true);
+    // approx: avg 1.65(1-e^{-t/τ}) = 1.0 → t ≈ τ ln(1.65/0.65)
+    const tapprox = 1e-2 * Math.log(1.65 / 0.65);
+    ok(Math.abs(t6 - tapprox) < 2e-6, 'cross: skip-ahead 1MHz PWM+LPF', 't6=' + t6 + ' approx=' + tapprox);
+    const vAt = tl6.valueAt(t6), vBefore = tl6.valueAt(t6 - 1e-9);
+    ok(vAt >= 1.0 - 1e-9 && vBefore < 1.0, 'cross: skip-ahead exact crossing value', vBefore + ' -> ' + vAt);
+  }
+  // ---------- 5. Peak detect ----------
+  if (sec(5)) {
+    const ch0 = new S.Chain([]);
+    const tl = new S.Timeline();
+    tl.push(0, S.rawConst(0), ch0, new Float64Array(0));
+    tl.push(0.0123, S.rawConst(3.3), ch0);
+    tl.push(0.0123 + 1e-7, S.rawConst(0), ch0);
+    const N = 100, dt = 1e-3;
+    const mn = new Float64Array(N), mx = new Float64Array(N), sm = new Float64Array(N);
+    tl.samplePeak(0, dt, N, mn, mx); tl.sample(0, dt, N, sm);
+    ok(mx[12] === 3.3 && mn[12] === 0, 'peak: 100ns glitch captured at 1kSa/s');
+    ok(Math.max.apply(null, sm) === 0, 'sample mode misses 100ns glitch (expected)');
+    const tl2 = new S.Timeline();
+    tl2.push(0, S.rawPWM(0, 1e-6, 1e-7, 3.3, 0), ch0);
+    tl2.samplePeak(0, 1e-3, 10, mn, mx);
+    ok(mn[3] === 0 && mx[3] === 3.3, 'peak: 1MHz 10% PWM at 1kSa/s shows full envelope');
+  }
+  // ---------- 6. Lua runtime ----------
+  if (sec(6)) {
+    const board = new B.Board();
+    const vfs = new VS.VFS();
+    const logs = [];
+    const rt = new VS.LuaRuntime(board, vfs, { print: (t, k, tt) => logs.push([k, t, tt]), write: (t) => logs.push(['raw', t]), onState: () => {} });
+    rt.cpi = 0;
+    const src = [
+      'local n = 0',
+      'for i = 1, 5 do gpio_write(GPIO1, i % 2) delay(1) n = n + 1 end',
+      'print("n", n, string.format("%.6f", sim_time()))',
+      'local f = assert(io.open("t.csv", "w")) for i = 1, 3 do f:write(i, ",", i * i, "\\n") end f:close()',
+      'local s = 0 for line in io.lines("t.csv") do local a, b = line:match("(%d+),(%d+)") s = s + tonumber(b) end print("sum", s)',
+      'local g = io.open("t.csv") local x = g:read("n") g:close() print("first", x)',
+      'print("bits", 0xF0 | 0x0F, 0xFF & 0x3C, 1 << 4, 0xFF ~ 0x0F, ~0, 7 // 2, 7 % 3)',
+      'local ok, err = pcall(function() gpio_write(DAC1, 1) end) print("pcall", ok, err)',
+      'for k, t in every(0.002, 3) do print("every", k, string.format("%.4f", t)) end',
+      'pwm_start(PWM1, 1000, 25) local f2, d2, r2 = pwm_read(PWM1) print("pwm", f2, d2, r2)',
+      'dac_write_voltage(DAC1, 1.65) local c, v = dac_read(DAC1) print("dac", c, string.format("%.4f", v))',
+      'local co = coroutine.wrap(function() for i = 1, 2 do coroutine.yield(i) end end) print("co", co(), co())',
+      'print("clk", clk_freq(), ticks() > 0)'
+    ].join('\n');
+    ok(rt.start(src, 0, 'script'), 'lua: compile');
+    let t = 0;
+    for (let i = 0; i < 200 && rt.state === 'running'; i++) { t += 0.001; rt.run(t, performance.now() + 1000); }
+    const outs = logs.filter(l => l[0] === 'out').map(l => l[1]);
+    ok(rt.state === 'done', 'lua: finished', rt.state + ' ' + JSON.stringify(rt.errorInfo));
+    ok(outs[0] === 'n\t5\t0.005000', 'lua: delay timing exact', outs[0]);
+    ok(outs[1] === 'sum\t14', 'lua: file write + io.lines', outs[1]);
+    ok(outs[2] === 'first\t1', 'lua: read("n")', outs[2]);
+    ok(outs[3] === 'bits\t255\t60\t16\t240\t-1\t3\t1', 'lua: bitwise/arith', outs[3]);
+    ok(/^pcall\tfalse\t.*DAC pin/.test(outs[4]), 'lua: pcall catches API error', outs[4]);
+    ok(outs[5] === 'every\t1\t0.0050' && outs[7] === 'every\t3\t0.0090', 'lua: every() drift-free', outs[5] + ' | ' + outs[7]);
+    ok(outs[8] === 'pwm\t1000.0\t25.0\ttrue', 'lua: pwm_read', outs[8]);
+    ok(outs[9] === 'dac\t2048\t1.6504', 'lua: dac', outs[9]);
+    ok(outs[10] === 'co\t1\t2', 'lua: coroutines', outs[10]);
+    ok(/^clk\t10000000\.0\ttrue$/.test(outs[11]), 'lua: clk', outs[11]);
+    // events on GPIO1
+    const q = board.pin(1).queue.map(e => e.t.toFixed(6) + ':' + e.raw.v);
+    ok(q.join(' ') === '0.000000:3.3 0.001000:0 0.002000:3.3 0.003000:0 0.004000:3.3', 'lua: GPIO events timestamps', q.join(' '));
+  }
+  // ---------- 7. instruction timing (CPI) ----------
+  if (sec(7)) {
+    const board = new B.Board();
+    const rt = new VS.LuaRuntime(board, new VS.VFS(), { print: () => {}, onState: () => {} });
+    rt.cpi = 10; // 1 µs / instr @10MHz
+    ok(rt.start('while true do gpio_write(GPIO1, HIGH) gpio_write(GPIO1, LOW) end', 0, 'script'), 'cpi: compile');
+    rt.run(0.01, performance.now() + 2000);
+    const q = board.pin(1).queue;
+    const per = (q[q.length - 1].t - q[1].t) / ((q.length - 2) / 2);
+    ok(q.length > 100 && per > 2e-6 && per < 1e-4, 'cpi: bit-bang loop period from instruction timing', 'period ' + VS.util.fmtEng(per, 's') + ' events ' + q.length);
+    // events must be monotonic & <= target
+    let mono = true; for (let i = 1; i < q.length; i++) if (q[i].t < q[i - 1].t) mono = false;
+    ok(mono && q[q.length - 1].t <= 0.01 + 1e-12, 'cpi: events monotonic and <= T_target', 'last ' + q[q.length - 1].t);
+    // all events on clock grid
+    let grid = true; for (const e of q) { const k = e.t * 1e7; if (Math.abs(k - Math.round(k)) > 1e-3) grid = false; }
+    ok(grid, 'cpi: events aligned to board clock');
+    rt.stop();
+    // error line number
+    const rt2 = new VS.LuaRuntime(board, new VS.VFS(), { print: () => {}, onState: () => {} });
+    rt2.start('local a = 1\nlocal b = nil\nprint(b.x)', 0, 'script'); rt2.run(1, performance.now() + 1000);
+    ok(rt2.state === 'error' && rt2.errorInfo.line === 3, 'lua: runtime error line', JSON.stringify(rt2.errorInfo && rt2.errorInfo.line));
+    const rt3 = new VS.LuaRuntime(board, new VS.VFS(), { print: () => {}, onState: () => {} });
+    ok(!rt3.start('local a = = 1', 0, 'script') && rt3.errorInfo.line === 1, 'lua: syntax error line');
+  }
+  // ---------- 8. full simulator ----------
+  if (sec(8)) {
+    const sim = new VS.Simulator();
+    sim.setProbe(0, 3); // PWM1 → CH1
+    sim.setProbe(1, 1); // GPIO1 → CH2
+    sim.scope.s.tdiv = 200e-6; sim.scope.s.trig.level = 1.65; sim.scope.s.trig.mode = 'normal';
+    sim.scope.s.display.noise = false;
+    sim.runScript('pwm_start(PWM1, 2500, 30)\nwhile true do gpio_toggle(GPIO1) delay(0.5) end', 'script');
+    for (let i = 0; i < 100; i++) { sim._applyActions(); sim._chunk(sim.simTime + 0.004, performance.now() + 1000); }
+    const rec = sim.scope.record;
+    ok(rec && rec.kind === 'trig' && !rec.forced, 'sim: triggered record captured', rec ? ('wfm ' + sim.scope.wfmCount) : 'none');
+    const W = sim.scope.mainWindow(rec);
+    const m = VS.scopeMeasure(rec, 0, W.L, W.R);
+    near(m.freq, 2500, 2, 'sim: measured PWM freq');
+    near(m.duty, 30, 0.6, 'sim: measured PWM duty');
+    near(m.vpp, 3.3, 0.05, 'sim: measured Vpp');
+    // trigger point sample: value at trigger
+    const iT = Math.round((rec.tRef - rec.t0) / rec.dt);
+    ok(rec.ch[0].data[iT + 1] > 1.65 && rec.ch[0].data[iT - 1] < 1.65, 'sim: trigger at center of record', 'iT=' + iT + ' ' + rec.ch[0].data[iT - 1] + ' -> ' + rec.ch[0].data[iT + 1]);
+    // CH2 GPIO toggles every 0.5 ms -> 1kHz square
+    const m2 = VS.scopeMeasure(rec, 1, W.L, W.R);
+    ok(m2.freq < 1000 && m2.freq > 990, 'sim: GPIO toggle freq (delay 0.5ms + 명령어 오버헤드)', m2.freq.toFixed(2) + ' Hz');
+    // LPF on PWM1 then check Vavg ~ 0.99
+    sim.setFilter(3, { type: 'LPF', R: 10000, C: 1e-6 });
+    for (let i = 0; i < 100; i++) { sim._applyActions(); sim._chunk(sim.simTime + 0.004, performance.now() + 1000); }
+    sim.scope.s.trig.mode = 'auto';
+    for (let i = 0; i < 20; i++) { sim._applyActions(); sim._chunk(sim.simTime + 0.004, performance.now() + 1000); }
+    const rec2 = sim.scope.record;
+    const m3 = VS.scopeMeasure(rec2, 0, W.L, W.R);
+    near(m3.vavg, 3.3 * 0.3, 0.05, 'sim: LPF on PWM → DC avg');
+    ok(m3.vpp < 0.3, 'sim: LPF ripple small', 'vpp ' + m3.vpp.toFixed(3));
+    // AC coupling on CH2 (GPIO square) -> avg ~ 0
+    sim.setCoupling(1, 'AC');
+    for (let i = 0; i < 150; i++) { sim._applyActions(); sim._chunk(sim.simTime + 0.004, performance.now() + 1000); }
+    const rec3 = sim.scope.record;
+    const m4 = VS.scopeMeasure(rec3, 1, sim.scope.mainWindow(rec3).L, sim.scope.mainWindow(rec3).R);
+    ok(Math.abs(m4.vavg) < 0.25 && m4.vmax > 1.4 && m4.vmin < -1.4, 'sim: AC coupling removes DC', 'avg ' + m4.vavg.toFixed(3) + ' max ' + m4.vmax.toFixed(2) + ' min ' + m4.vmin.toFixed(2));
+    // average mode with noise reduces std
+    out.push('INFO sim time ' + sim.simTime.toFixed(4) + ' s, bps ch0=' + sim.inputs[0].tl.length + ' ch1=' + sim.inputs[1].tl.length);
+  }
+  // ---------- 9. 성능 / Average / Single / MAX ----------
+  if (sec(9)) {
+    const ch0 = new S.Chain([]), ch1 = new S.Chain([{ type: 'LPF', tau: 1e-4 }]), ch2 = new S.Chain([{ type: 'LPF', tau: 1e-4 }, { type: 'HPF', tau: 0.0159 }]);
+    const mk = (ch) => { const tl = new S.Timeline(); const r = S.rawPWM(0, 1e-5, 3e-6, 3.3, 0); const x = new Float64Array(ch.n); ch.equilibrium(S.rawAverage(r), x); tl.push(0, r, ch, x); return tl; };
+    const N = 1000000, buf = new Float32Array(N), b2 = new Float32Array(N);
+    for (const [nm, ch] of [['raw', ch0], ['LPF', ch1], ['LPF+AC', ch2]]) {
+      const tl = mk(ch);
+      let t0 = performance.now(); tl.sample(1.234, 1e-8, N, buf); const tA = performance.now() - t0;
+      t0 = performance.now(); tl.sample(1.234, 1e-3, N, buf); const tB = performance.now() - t0;
+      t0 = performance.now(); tl.samplePeak(1.234, 1e-6, N, buf, b2); const tC = performance.now() - t0;
+      ok(tA < 400 && tB < 2500 && tC < 4000, 'perf 1M samples PWM ' + nm, 'dense ' + tA.toFixed(0) + 'ms, sparse ' + tB.toFixed(0) + 'ms, peak ' + tC.toFixed(0) + 'ms');
+    }
+    const sim = new VS.Simulator();
+    sim.setProbe(0, 5);
+    sim.scope.s.tdiv = 1e-4; sim.scope.s.ch[0].vdiv = 0.01; sim.scope.s.ch[0].pos = -165; sim.scope.s.ch[0].probe = 1;
+    sim.runScript('dac_write_voltage(DAC1, 1.65)', 'script');
+    const std = () => { const d = sim.scope.record.ch[0].data; let m = 0; for (const v of d) m += v; m /= d.length; let q = 0; for (const v of d) q += (v - m) * (v - m); return Math.sqrt(q / d.length); };
+    for (let i = 0; i < 20; i++) { sim._applyActions(); sim._chunk(sim.simTime + 0.004, performance.now() + 1000); }
+    const s1 = std();
+    sim.scope.s.acq.mode = 'average'; sim.scope.s.acq.avgN = 64; sim.scope.rearm();
+    for (let i = 0; i < 200; i++) { sim._applyActions(); sim._chunk(sim.simTime + 0.002, performance.now() + 1000); }
+    const s2 = std();
+    ok(s2 < s1 / 3, 'average mode reduces noise', 'sample σ=' + VS.util.fmtEng(s1, 'V') + ' avg' + sim.scope.record.avgCount + ' σ=' + VS.util.fmtEng(s2, 'V'));
+    sim.scope.s.acq.mode = 'sample'; sim.scope.single();
+    const id0 = sim.scope.recId;
+    for (let i = 0; i < 10; i++) { sim._applyActions(); sim._chunk(sim.simTime + 0.004, performance.now() + 1000); }
+    ok(sim.scope.running && sim.scope.recId === id0, 'single: DC 신호는 트리거되지 않아 대기', 'running=' + sim.scope.running);
+    sim.scope.forceTrigger();
+    for (let i = 0; i < 10; i++) { sim._applyActions(); sim._chunk(sim.simTime + 0.004, performance.now() + 1000); }
+    ok(!sim.scope.running && sim.scope.recId === id0 + 1, 'single + FORCE: 정확히 1회 획득 후 STOP', 'running=' + sim.scope.running + ' new records=' + (sim.scope.recId - id0));
+    const sim2 = new VS.Simulator(); sim2.setProbe(0, 1); sim2.speed = 'max';
+    sim2.runScript('while true do gpio_toggle(GPIO1) end', 'script');
+    sim2._applyActions();
+    let t0 = performance.now(); sim2._tick(); const dtk = performance.now() - t0;
+    ok(dtk < 200, 'MAX speed tick with busy loop returns within budget', dtk.toFixed(1) + ' ms, sim t=' + VS.util.fmtEng(sim2.simTime, 's'));
+    // MAX 속도 + 일반 스크립트(빠른 시작): 틱 시간/진행 속도
+    const sim3 = new VS.Simulator(); sim3.setProbe(0, 1); sim3.setProbe(1, 3); sim3.speed = 'max';
+    sim3.runScript(VS.EXAMPLES[0].code, 'q.lua'); sim3._applyActions();
+    let worst = 0; const r0 = performance.now();
+    for (let i = 0; i < 30; i++) { const a = performance.now(); sim3._tick(); worst = Math.max(worst, performance.now() - a); }
+    const real = (performance.now() - r0) / 1000;
+    ok(worst < 60 && sim3.simTime / real > 20, 'MAX speed: 틱 시간 제한 및 실시간 대비 가속', 'worst tick ' + worst.toFixed(1) + 'ms, ' + (sim3.simTime / real).toFixed(0) + 'x realtime, records ' + sim3.scope.wfmCount);
+  }
+  // ---------- 10. 예제 스크립트 실행 검증 ----------
+  if (sec(10)) {
+    for (const ex of VS.EXAMPLES) {
+      const sim = new VS.Simulator();
+      const logs = [];
+      sim.on('console', (m) => logs.push(m));
+      const st = ex.setup || {};
+      if (st.probes) { sim.setProbe(0, st.probes[0] || null); sim.setProbe(1, st.probes[1] || null); }
+      if (st.filters) for (const k of Object.keys(st.filters)) sim.setFilter(+k, st.filters[k]);
+      if (st.tdiv) sim.scope.s.tdiv = st.tdiv;
+      if (st.trig) Object.assign(sim.scope.s.trig, st.trig);
+      if (st.acq && st.acq.mode) sim.scope.s.acq.mode = st.acq.mode;
+      sim.runScript(ex.code, ex.name); sim._applyActions();
+      const t0 = performance.now();
+      for (let i = 0; i < 150 && sim.runtime.state === 'running'; i++) { sim._applyActions(); sim._chunk(sim.simTime + 0.004, performance.now() + 500); }
+      const errs = logs.filter(m => m.kind === 'err').map(m => m.text);
+      const outs = logs.filter(m => m.kind === 'out').length;
+      ok(errs.length === 0 && sim.runtime.state === 'running', 'example ' + ex.name, (errs[0] || ('state=' + sim.runtime.state + ' prints=' + outs + ' records=' + sim.scope.wfmCount + ' ' + (performance.now() - t0).toFixed(0) + 'ms')).slice(0, 160));
+    }
+  }
+} catch (e) { fail++; out.push('EXCEPTION ' + e + '\n' + e.stack); }
+out.unshift('RESULT pass=' + pass + ' fail=' + fail);
+document.getElementById('out').textContent = out.join('\n');
+})();
+</script></body></html>
