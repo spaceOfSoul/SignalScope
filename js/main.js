@@ -61,7 +61,7 @@
       this.topClock = UI.el('span', { class: 'simclock' });
       this.topActual = UI.el('span', { class: 'mono dim', style: 'min-width:110px' });
       tb.append(
-        UI.el('div', { class: 'brand' }, ['⏚ Oscilloscope Imitation', UI.el('small', { text: 'GPIO · PWM · DAC 계측 시뮬레이터' })]),
+        UI.el('div', { class: 'brand' }, ['⏚ SignalScope', UI.el('small', { text: 'GPIO · PWM · DAC 계측 시뮬레이터' })]),
         UI.el('div', { class: 'group' }, [wb('win1', '1 · 핀/프로브'), wb('win2', '2 · 스크립트'), wb('win3', '3 · 오실로스코프'),
           UI.el('button', { text: '배치 초기화', title: '창 배치를 기본값으로', onclick: () => this.wm.defaultLayout() })]),
         UI.el('div', { class: 'grow' }),

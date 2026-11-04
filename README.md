@@ -1,4 +1,4 @@
-# Oscilloscope Imitation
+# SignalScope
 
 GPIO / GPIO_PWM / DAC 출력 신호를 **가상 오실로스코프로 측정하는 동작을 모사**하는 GUI 프로그램입니다.
 `요구사항목록/요구사항.md` 에 정의된 3개의 창(핀/프로브 설정, 출력 제어 스크립트, 오실로스코프)을 하나의 웹 페이지 안에서
