@@ -1,8 +1,8 @@
-# Oscilloscope Imitation
+# SignalScope
 
 GPIO / GPIO_PWM / DAC 출력 신호를 **가상 오실로스코프로 측정하는 동작을 모사**하는 GUI 프로그램입니다.
-`요구사항.md` 에 정의된 3개의 창(핀/프로브 설정, 출력 제어 스크립트, 오실로스코프)을 하나의 웹 페이지 안에서
-드래그/크기조절이 가능한 창으로 제공합니다.
+`요구사항목록/요구사항.md` 에 정의된 3개의 창(핀/프로브 설정, 출력 제어 스크립트, 오실로스코프)을 하나의 웹 페이지 안에서
+드래그/크기조절이 가능한 창으로 제공하며, `요구사항목록/요구사항_2.md` 의 **XY Mode**(X = CH1 전압, Y = CH2 전압)를 지원합니다.
 
 - 구현: HTML + JavaScript (빌드/설치 불필요), 스크립트 엔진은 **Lua 5.3** ([fengari](https://github.com/fengari-lua/fengari), MIT)
 - 브라우저: Chrome / Edge 권장 (Firefox 도 동작, 단 "PC 폴더 연결" 기능은 Chrome/Edge 전용)
@@ -21,7 +21,7 @@ GPIO / GPIO_PWM / DAC 출력 신호를 **가상 오실로스코프로 측정하�
 |---|---|
 | **창 1 · 출력 Pin 설정 및 Probe 배치** | 보드 다이어그램 + 핀 표. 핀(다이어그램 또는 체크박스)을 클릭/체크하여 Probe 지정(최대 2개 → CH1, CH2). 핀별 드롭다운: **Filter**(사용안함 / LPF(R-C) / HPF(C-R), 기본 "사용안함", R·C 값 입력 → τ, fc 표시), **Enable/Disable**(기본 Enable). 현재 출력값과 LED 표시. |
 | **창 2 · 출력 제어** | Lua 스크립트 편집기(구문 강조/줄 번호/오류 줄 표시), 실행/정지, **시뮬레이션 일시정지·재개, 속도(0.1X/1X/10X/MAX)**, 보드 클럭(CLK)·명령어 사이클(CPI) 설정, 콘솔, 파일 관리(가상 파일 시스템/PC 폴더 연결), API 도움말, 예제. |
-| **창 3 · 오실로스코프** | 10×8 division 화면, CH1(노랑)/CH2(청록), Vertical / Horizontal / Trigger / Acquire / Display 패널, 자동 측정(Freq, Period, Duty, Vpp, Vmax, Vmin, Vavg, Vrms). |
+| **창 3 · 오실로스코프** | 10×8 division 화면, CH1(노랑)/CH2(청록), **Display Format (Y-T / XY)**, XY / Vertical / Horizontal / Trigger / Acquire / Display 패널, 자동 측정(Freq, Period, Duty, Vpp, Vmax, Vmin, Vavg, Vrms), CSV 저장. |
 
 상단 바: 창 표시/숨김, 배치 초기화, 스크립트 상태, 시뮬레이션 상태(RUNNING/PAUSED)·Pause·속도, 시뮬레이션 시각과 실제 속도.
 단축키: <kbd>Space</kbd> 시뮬레이션 일시정지/재개, 편집기에서 <kbd>Ctrl</kbd>+<kbd>Enter</kbd> 실행, <kbd>Ctrl</kbd>+<kbd>S</kbd> 저장.
@@ -34,6 +34,20 @@ GPIO / GPIO_PWM / DAC 출력 신호를 **가상 오실로스코프로 측정하�
   좌측 채널 마커 드래그 = 수직 위치, 오버뷰 클릭 = Zoom 위치 이동, Zoom 창 더블클릭 = Zoom 해제.
 - **RUN/STOP**: 계측기 획득만 시작/중지 (보드 시뮬레이션은 계속). **SINGLE**: 트리거 1회 후 정지.
   **AUTOSET**: 최근 신호로 V/div·Time/div·트리거 자동 설정. **FORCE**: 강제 트리거.
+- **Display ▸ ⤓ CSV 저장**: 현재 획득된 파형을 CSV 로 다운로드 (Timestamp = Simulation Clock 시각).
+  Y-T: `Timestamp, CH1, CH2` (Peak Detect 는 Min/Max), XY: `Timestamp, CH1 Voltage (X), CH2 Voltage (Y)`.
+
+### XY 모드 조작
+
+- **Display Format ▸ XY** 로 전환 (Y-T 로 되돌리면 기존 트리거 획득 재개). X축 = CH1, Y축 = CH2.
+- **XY Mode 패널**: Draw(**Line / Dot / Persistence**), Persist(잔상 유지 50 ms ~ 10 s 또는 ∞ 누적, 잔상 지우기),
+  Rate(XY Sample Rate), Points(궤적 점 수 → 궤적 길이 = Points / Rate), Zoom ×, Zoom 중심 → 0, Position → 0.
+- **Vertical** 의 CH1 Volts/div·Position 은 X축, CH2 는 Y축에 각각 독립 적용. Probe/Coupling 도 그대로 적용.
+- **화면**: 휠 = Zoom(마우스 위치 고정), 드래그 = X/Y Position 이동(Zoom 중에는 확대 영역 이동),
+  좌측 **2** 마커 = CH2(Y) 0 V 위치, 하단 **1** 마커 = CH1(X) 0 V 위치(드래그), 우상단 오버뷰 클릭 = Zoom 위치, 더블클릭 = Zoom 해제.
+- **RUN/STOP**: 궤적 획득만 중지/재개(재개 시 새 궤적), **SINGLE**: Points 만큼 1회 획득 후 정지,
+  **AUTOSET**: X/Y V/div·Position 을 신호 범위에, 궤적 길이를 신호 주기(느린 신호 2 주기 이상)에 맞춤.
+- Horizontal(Time/div), Trigger(Edge), Acquire(Peak/Average), FORCE 는 XY 모드에서 비활성(회색 표시).
 
 ## 요구사항 대응
 
@@ -77,6 +91,26 @@ GPIO / GPIO_PWM / DAC 출력 신호를 **가상 오실로스코프로 측정하�
 | 렌더링 주기와 시뮬레이션 주기 독립 | 시뮬레이션 루프(≈4 ms, `setTimeout`) ↔ 렌더링(`requestAnimationFrame`) 분리 |
 | 높은 PWM 주파수/짧은 펄스 일관 표현 | 이벤트/해석 기반 계산 (샘플 단위 적분 없음), 픽셀 열 min/max 표시 |
 
+### 요구사항_2 · XY Mode
+| 요구사항 | 구현 |
+|---|---|
+| 1. Y-T 외에 XY Mode (X = CH1 전압, Y = CH2 전압) | Display Format ▸ `Y-T` / `XY` |
+| 2. Y-T / XY 전환 | 세그먼트 버튼 (설정 저장/복원 포함). 전환 시 진행 중 획득을 버리고 새 모드로 획득 |
+| 3. 동일 Simulation Timestamp 의 CH1, CH2 전압 → 하나의 좌표 | Simulation Clock 격자 `t_k = k / fs` 에서 두 채널을 **같은 시각 배열**로 샘플링해 (X, Y) 쌍으로 저장 |
+| 4. 시간 순서대로 연결한 궤적 | 링버퍼의 최근 `Points` 개를 시간 순으로 연결 (궤적 길이 = Points / Rate) + 최신 샘플(빔) 표시 |
+| 5. 각 축 Volt/Div, Position 독립 설정 | CH1 → X축, CH2 → Y축 (노브 / 화면 마커 드래그). 획득 데이터는 전압으로 보관되어 Stop 후에도 재매핑 |
+| 6. Line / Dot / Persistence | Line = 선 연결, Dot = 점, Persistence = 픽셀별 마지막 샘플 시각을 기록해 **Simulation Clock 기준**으로 감쇠(50 ms ~ 10 s), ∞ = 무한 누적(히트 밀도 밝기) |
+| 7. Run / Stop, Zoom | RUN/STOP/SINGLE, Zoom ×2 ~ ×50 (휠/노브/드래그, 오버뷰 + 확대 영역 표시, 눈금은 확대된 V/div 로 표기) |
+| 8. Time/Div, Edge Trigger 비활성, 획득은 Simulation Clock | Horizontal·Trigger·Acquire 패널과 FORCE 비활성. 획득은 시뮬레이션 틱마다 `(t_prev, t_now]` 의 격자 시각을 연속 샘플링 |
+| 9. Probe / Filter / Coupling 동일 적용 | Y-T 와 같은 채널 신호 체인(핀 필터 → 프로브 → 커플링 → ADC)의 Timeline 을 샘플링 |
+| 10. X/Y 전압 눈금, 0 V 기준선 | 축별 전압 눈금(채널 색), 0 V 점선(CH1 세로선 / CH2 가로선), 원점 `0,0` 표시, 화면 밖이면 마커에 방향 화살표 |
+| 11. CSV 저장 (Timestamp, CH1 X, CH2 Y) | Display ▸ ⤓ CSV 저장 → `xy_t<시각>s.csv` (Y-T 모드에서도 CSV 저장 지원) |
+| 12. Probe 미연결 / 비활성 시 표시 중단 + GUI 표시 | 두 채널 중 하나라도 Probe 미연결, 연결 핀 Disable, 채널 OFF 이면 획득·표시 중단 → 화면 경고 박스, 상태 `Hold`, XY 패널 사유 표시. 회복 시 새 궤적으로 재개 |
+| 추가 명시: 샘플링 시점 일치 | 두 채널은 같은 `ta, dt` 로 샘플링 (테스트: 동시에 반대로 전환되는 두 GPIO 의 XY 점에 (H,H)/(L,L) 이 하나도 없음, 0.5 µs 어긋나게 샘플링하면 검출됨) |
+
+XY 측정: 채널별 Vpp/Vmax/Vmin/Vavg/Vrms/Freq, 두 채널 주파수가 같으면 기본파 **위상차 Δφ(CH2−CH1)** 와 **진폭비 |Y|/|X|**
+(정수 주기 구간 DFT), 다르면 **주파수비 Y/X** 를 표시합니다.
+
 ### 추가 명시
 1. **시뮬레이션과 GUI 렌더링 분리** — 100 kHz PWM 도 내부에서는 모든 전환 시점이 해석적으로 계산됩니다(주기 사상 고정점으로 k주기 점프).
 2. **Stop ≠ Pause** — 오실로스코프 STOP 은 획득만 중단(보드/시뮬레이션 시간은 진행), Simulation Pause 는 보드와 계측기의 가상 시간 자체를 정지합니다.
@@ -103,6 +137,10 @@ GPIO / GPIO_PWM / DAC 출력 신호를 **가상 오실로스코프로 측정하�
 - **획득**: 무장(Arm) 후 Pre-trigger 구간이 채워져야 트리거 허용, 레코드 완료 후 다음 틱에 재무장(데드타임).
   Auto 모드는 일정 시간(max(레코드 길이, 20 ms)) 동안 트리거가 없으면 강제 획득,
   Auto + 100 ms/div 이상에서는 Roll 모드(스크롤)로 동작합니다.
+- **XY 획득**: 트리거 없이 연속 획득. 매 틱 `(t_prev, t_now]` 에 속하는 격자 시각 `t_k = k / fs` 에서 CH1, CH2 를 같은 시각 배열로
+  샘플링(ADC 포함)해 링버퍼(용량 = max(Points, 0.1 s 분량), 최대 262 k)에 저장합니다. 한 틱의 샘플 수가 용량을 넘으면(MAX 속도 등)
+  가장 오래된 구간을 생략하며, 잔상 표시에서는 그 공백을 잇지 않습니다. Stop 은 획득만 멈추고(재개 시 새 궤적),
+  Pause 는 시뮬레이션 시간 자체가 멈추므로 잔상 감쇠도 함께 정지합니다.
 
 ## 스크립트 API 요약
 
@@ -140,6 +178,8 @@ print(...)  printf("%.3f V", v)
 | 06_file_playback | CSV 파형 파일 읽기 → DAC 재생, 결과 로그 파일 쓰기 |
 | 07_glitch | 1 µs 글리치 → Sample vs Peak Detect, Single 트리거 |
 | 08_cpu_timing | 명령어 실행시간(CPI) 모델과 비트뱅잉 속도 |
+| 09_xy_lissajous | **XY 모드**: DAC1/DAC2 사인파 리사주 도형 (1:1 원 → 1:2 → 3:2 → 3:4 → 45° 타원), Persistence |
+| 10_xy_rc_phase | **XY 모드**: 사인파 vs RC LPF 통과 사인파 → 위상 지연 타원, Δφ / 진폭비를 이론값과 비교 |
 
 ## 파일 구조
 
@@ -155,7 +195,8 @@ js/lua_prelude.js     Lua 프렐류드 (API 래퍼, io 라이브러리, require)
 js/lua_runtime.js     스크립트 실행기 (코루틴, 명령어 시간 모델, API 바인딩)
 js/scope.js           오실로스코프 획득 엔진 (트리거, 획득 모드, ADC, Roll, 측정)
 js/sim.js             시뮬레이션 엔진 (Simulation Clock, 속도, Pause)
-js/scope_view.js      오실로스코프 화면 렌더링/마우스 조작
+js/scope_view.js      오실로스코프 화면 렌더링/마우스 조작 (Y-T)
+js/scope_view_xy.js   XY 모드 화면 (Line/Dot/Persistence, 축 눈금/0 V 기준선, Zoom/오버뷰, 표시 중단 안내)
 js/ui_*.js, main.js   창/컨트롤/편집기/앱 구성
 examples/*.lua        예제 스크립트
 tests/test.html       코어 테스트 (브라우저로 열면 결과 표시)
@@ -169,7 +210,9 @@ Git Bash 에서는 `sh tests/run_tests.sh` (특정 섹션: `sh tests/run_tests.s
 
 검증 항목: RC 체인 해석해 vs RK4 수치적분, PWM 주기 점프 vs 엣지 단위 적분, 트리거 교차 시각(해석해/무차별 대입 비교),
 Peak Detect 글리치 보존, Lua 타이밍/파일 입출력/비트 연산/오류 줄 번호, 명령어 시간 모델과 클럭 정렬, 전체 시뮬레이터
-(주파수·듀티 측정, LPF·AC 커플링), 성능(1 Mpts), Average 잡음 감소, Single, MAX 속도 예산, 모든 예제 실행.
+(주파수·듀티 측정, LPF·AC 커플링), 성능(1 Mpts), Average 잡음 감소, Single, MAX 속도 예산, 모든 예제 실행,
+XY 모드(섹션 11: 동일 시각 샘플 쌍, 필터/커플링 적용, 리사주 원·RC 위상, Probe 미연결/Disable/채널 OFF 시 중단·재개,
+Run/Stop/Single, CSV, Y-T 복귀, 1 MSa/s 연속 획득 성능).
 
 ## 참고 / 제약
 

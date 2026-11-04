@@ -217,8 +217,8 @@
   };
 
   /** 텍스트 파일 다운로드 */
-  UI.download = function (name, text) {
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  UI.download = function (name, text, mime) {
+    const blob = new Blob([text], { type: (mime || 'text/plain') + ';charset=utf-8' });
     const a = UI.el('a', { href: URL.createObjectURL(blob), download: name });
     document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);

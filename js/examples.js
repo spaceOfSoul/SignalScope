@@ -239,6 +239,85 @@ while true do
   delay_us(100)
 end
 `
+    },
+    {
+      name: '09_xy_lissajous.lua', title: '09 XY 모드: 리사주 도형 (DAC1 = X, DAC2 = Y)',
+      setup: {
+        probes: [5, 6], mode: 'xy', ch: [{ vdiv: 0.5, pos: -3.3 }, { vdiv: 0.5, pos: -3.3 }],
+        xy: { sr: 1e6, rl: 5000, draw: 'persist', persist: 0.2 }
+      },
+      code: String.raw`-- XY 모드: 리사주(Lissajous) 도형
+--  DAC1 → CH1 = X축,  DAC2 → CH2 = Y축   (창 3 ▸ Display Format = XY)
+--  주파수 비 / 위상차를 2 초마다 전환: 1:1(90° → 원) → 1:2 → 3:2 → 3:4 → 1:1(45° → 타원)
+--  기본 주파수 200 Hz → 모든 패턴의 반복 주기 = 5 ms = XY 궤적 길이 (1 MSa/s × 5 kpts)
+--  Persistence 로 패턴 전환 시 잔상을, Zoom 으로 DAC 계단(갱신율 20 kHz)을 확인해 보자.
+local fs   = 20000            -- DAC 갱신율 (Hz)
+local base = 200              -- 기본 주파수 (Hz)
+local A, MID = 1.5, 1.65      -- 진폭 / 중심 전압 (V)
+local patterns = {            -- { X 배수, Y 배수, Y 위상(°) }
+  { 1, 1, 90 }, { 1, 2, 0 }, { 3, 2, 90 }, { 3, 4, 45 }, { 1, 1, 45 }
+}
+local hold = 2 * fs           -- 패턴 유지 = 2 s (갱신 횟수)
+local idx, k = 1, 0
+
+local function show(p)
+  printf("X : Y = %d : %d, 위상 %d°  (X %.0f Hz / Y %.0f Hz)", p[1], p[2], p[3], base * p[1], base * p[2])
+end
+show(patterns[idx])
+
+for n in every(1 / fs) do
+  local p = patterns[idx]
+  local w = 2 * math.pi * base * k / fs
+  dac_write_voltage(DAC1, MID + A * math.sin(p[1] * w))
+  dac_write_voltage(DAC2, MID + A * math.sin(p[2] * w + math.rad(p[3])))
+  k = k + 1
+  if k >= hold then
+    k = 0
+    idx = idx % #patterns + 1
+    show(patterns[idx])
+  end
+end
+`
+    },
+    {
+      name: '10_xy_rc_phase.lua', title: '10 XY 모드: RC 필터 위상 지연 (리사주 타원)',
+      setup: {
+        probes: [5, 6], mode: 'xy', filters: { 6: { type: 'LPF', R: 1600, C: 100e-9 } },
+        ch: [{ vdiv: 0.5, pos: -3.3 }, { vdiv: 0.5, pos: -3.3 }], xy: { sr: 1e6, rl: 5000, draw: 'line' }
+      },
+      code: String.raw`-- XY 모드: RC 필터의 위상 지연 / 진폭 감쇠 (리사주 타원)
+--  DAC1 → CH1 (X) : 원 신호 (사인파)
+--  DAC2 → CH2 (Y) : 같은 사인파 → 창 1 의 DAC2 LPF (R = 1.6 kΩ, C = 100 nF, fc ≈ 995 Hz)
+--  필터는 출력 핀과 Probe 사이의 독립 신호처리 단 → XY 모드에서도 동일하게 적용된다.
+--  화면 하단 XY 측정줄의 Δφ, |Y|/|X| 를 이론값과 비교해 보자 (f = fc 이면 약 -45°, 0.707).
+--  (두 DAC 쓰기 사이의 명령어 실행시간 수 µs 만큼 추가 위상 지연이 있다)
+local fs = 50000                      -- DAC 갱신율 (Hz)
+local freqs = { 1000, 300, 3000 }     -- 2 초마다 전환
+local R, C = 1600, 100e-9
+local fc = 1 / (2 * math.pi * R * C)
+local A, MID = 1.5, 1.65
+local idx, k = 1, 0
+local hold = 2 * fs
+
+local function show(f)
+  local ph = -math.deg(math.atan(f / fc))
+  local g = 1 / math.sqrt(1 + (f / fc) ^ 2)
+  printf("f = %4d Hz : 이론 위상 %.1f°, 진폭비 %.3f  (fc = %.1f Hz)", f, ph, g, fc)
+end
+show(freqs[idx])
+
+for n in every(1 / fs) do
+  local v = MID + A * math.sin(2 * math.pi * freqs[idx] * k / fs)
+  dac_write_voltage(DAC1, v)
+  dac_write_voltage(DAC2, v)
+  k = k + 1
+  if k >= hold then
+    k = 0
+    idx = idx % #freqs + 1
+    show(freqs[idx])
+  end
+end
+`
     }
   ];
 })(window);

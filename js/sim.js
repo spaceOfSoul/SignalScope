@@ -144,8 +144,7 @@
         // 최대 속도: 실시간 예산(~14ms) 안에서 가능한 만큼 진행.
         // 계측기는 청크당 최대 1개의 레코드를 획득하므로(데드타임), 청크 크기가 클수록 빠르다.
         const deadline = now + 14;
-        const H = this.scope.horiz();
-        const chunk = Math.max(H.W * 2, 0.1);
+        const chunk = this.scope.maxChunk();
         for (let guard = 0; guard < 400 && performance.now() < deadline; guard++) {
           const before = this.simTime;
           this._chunk(this.simTime + chunk, deadline);

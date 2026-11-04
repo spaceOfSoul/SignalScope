@@ -1,5 +1,5 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><title>vscope core tests</title></head>
+<html><head><meta charset="utf-8"><title>SignalScope core tests</title></head>
 <body><pre id="out">running...</pre>
 <script src="../lib/fengari-web.js"></script>
 <script src="../js/util.js"></script>
@@ -311,12 +311,177 @@ try {
       if (st.tdiv) sim.scope.s.tdiv = st.tdiv;
       if (st.trig) Object.assign(sim.scope.s.trig, st.trig);
       if (st.acq && st.acq.mode) sim.scope.s.acq.mode = st.acq.mode;
+      if (st.mode) sim.scope.setMode(st.mode);
+      if (st.xy) Object.assign(sim.scope.s.xy, st.xy);
+      if (st.ch) st.ch.forEach((c, i) => Object.assign(sim.scope.s.ch[i], c));
       sim.runScript(ex.code, ex.name); sim._applyActions();
       const t0 = performance.now();
       for (let i = 0; i < 150 && sim.runtime.state === 'running'; i++) { sim._applyActions(); sim._chunk(sim.simTime + 0.004, performance.now() + 500); }
       const errs = logs.filter(m => m.kind === 'err').map(m => m.text);
       const outs = logs.filter(m => m.kind === 'out').length;
-      ok(errs.length === 0 && sim.runtime.state === 'running', 'example ' + ex.name, (errs[0] || ('state=' + sim.runtime.state + ' prints=' + outs + ' records=' + sim.scope.wfmCount + ' ' + (performance.now() - t0).toFixed(0) + 'ms')).slice(0, 160));
+      const acq = sim.scope.isXY() ? 'xy pts=' + (sim.scope.xyRecord() ? sim.scope.xyRecord().n : 0) : 'records=' + sim.scope.wfmCount;
+      ok(errs.length === 0 && sim.runtime.state === 'running', 'example ' + ex.name, (errs[0] || ('state=' + sim.runtime.state + ' prints=' + outs + ' ' + acq + ' ' + (performance.now() - t0).toFixed(0) + 'ms')).slice(0, 160));
+    }
+  }
+  // ---------- 11. XY 모드 ----------
+  if (sec(11)) {
+    const step = (sim, n, dt) => { for (let i = 0; i < n; i++) { sim._applyActions(); sim._chunk(sim.simTime + (dt || 0.004), performance.now() + 1000); } };
+    const quant = (v, vd, pos) => (Math.max(-128, Math.min(127, Math.round((v / vd + pos) * 25))) / 25 - pos) * vd;
+    // (a) 동일 시점 샘플링: GPIO1 / GPIO2 를 같은 순간(CPI=0)에 서로 반대로 전환 → XY 점은 (H,L) 또는 (L,H) 뿐
+    {
+      const sim = new VS.Simulator();
+      sim.setProbe(0, 1); sim.setProbe(1, 2);
+      const s = sim.scope.s;
+      s.display.noise = false; s.ch[0].vdiv = s.ch[1].vdiv = 1; s.ch[0].pos = s.ch[1].pos = 0;
+      sim.scope.setMode('xy'); s.xy.sr = 1e6; s.xy.rl = 20000;
+      sim.runtime.setCPI(0);
+      sim.runScript('local v = 0\nwhile true do v = 1 - v gpio_write(GPIO1, v) gpio_write(GPIO2, 1 - v) delay_us(13) end', 'script');
+      step(sim, 20);
+      const rec = sim.scope.xyRecord();
+      let bad = 0, hl = 0, lh = 0;
+      for (let i = 0; i < rec.n; i++) { const a = rec.x[i] > 1.65, b = rec.y[i] > 1.65; if (a === b) bad++; else if (a) hl++; else lh++; }
+      ok(rec.n === 20000 && bad === 0 && hl > 5000 && lh > 5000, 'xy: CH1/CH2 동일 시각 샘플 쌍 (동시 반전 → 대각 점 없음)', 'n=' + rec.n + ' (H,L)=' + hl + ' (L,H)=' + lh + ' 불일치=' + bad);
+      // 검증 민감도: CH2 를 반 샘플(0.5 µs) 늦게 샘플링하면 불일치가 생겨야 한다
+      const ys = new Float32Array(rec.n);
+      sim.inputs[1].tl.sample(rec.t0 + rec.dt * 0.5, rec.dt, rec.n, ys);
+      let bad2 = 0; for (let i = 0; i < rec.n; i++) if ((rec.x[i] > 1.65) === (ys[i] > 1.65)) bad2++;
+      ok(bad2 > 100, 'xy: (대조) 샘플 시각이 어긋나면 불일치 검출', 'skew 0.5µs → 불일치 ' + bad2);
+      let mono = true; for (let i = 0; i + 1 < rec.n; i++) if (!(((rec.k0 + i + 1) * rec.dt) > ((rec.k0 + i) * rec.dt))) mono = false;
+      near(rec.tEnd - rec.t0, (rec.n - 1) * rec.dt, 1e-12, 'xy: 궤적 = 연속된 Simulation Clock 격자 t_k = k/fs');
+      ok(mono && Math.abs(rec.tEnd - sim.simTime) <= rec.dt + 1e-12, 'xy: 최신 샘플 = 현재 시뮬레이션 시각', 'tEnd ' + rec.tEnd + ' sim ' + sim.simTime);
+    }
+    // (b) 신호 처리 체인(필터 / 커플링 / ADC)이 Y-T 와 동일하게 적용
+    {
+      const sim = new VS.Simulator();
+      sim.setProbe(0, 5); sim.setProbe(1, 6);
+      sim.setFilter(5, { type: 'LPF', R: 1600, C: 100e-9 });       // DAC1 → LPF (fc ≈ 995 Hz)
+      sim.setCoupling(1, 'AC');                                      // CH2 AC 커플링
+      const s = sim.scope.s;
+      s.display.noise = false; s.ch[0].vdiv = 0.5; s.ch[0].pos = -3.3; s.ch[1].vdiv = 0.5; s.ch[1].pos = 0;
+      sim.scope.setMode('xy');
+      sim.runScript('for n in every(1/50000) do local v = 1.65 + 1.5 * math.sin(2 * math.pi * 1000 * n / 50000) dac_write_voltage(DAC1, v) dac_write_voltage(DAC2, v) end', 'script');
+      step(sim, 75);
+      const rec = sim.scope.xyRecord();
+      // 기대값 = 같은 시각의 Timeline 값 → ADC. 샘플 시각이 DAC 갱신 시각과 정확히 겹치면(우연속, 부동소수 ulp 차)
+      // 엣지 직전/직후 값 중 하나와 일치해야 한다.
+      let exact = 0, edge = 0, worst = 0;
+      const dev = (i, t) => Math.max(Math.abs(rec.x[i] - quant(sim.inputs[0].tl.valueAt(t), 0.5, -3.3)), Math.abs(rec.y[i] - quant(sim.inputs[1].tl.valueAt(t), 0.5, 0)));
+      for (let i = 0; i < rec.n; i += 7) {
+        const t = (rec.k0 + i) * rec.dt;
+        const d = dev(i, t);
+        if (d < 1e-5) { exact++; continue; }
+        if (Math.min(dev(i, t - 1e-12), dev(i, t + 1e-12)) < 1e-5) { edge++; continue; }
+        worst = Math.max(worst, d);
+      }
+      const tot = Math.ceil(rec.n / 7);
+      ok(exact + edge === tot, 'xy: 샘플 = 필터/커플링 적용 신호(Timeline) 의 ADC 값', exact + '/' + tot + ' 일치 + DAC 갱신 시각과 겹친 샘플 ' + edge + ' (±1 ps 내 일치), 불일치 최대 ' + worst.toFixed(4) + ' V');
+      let xmn = Infinity, xmx = -Infinity, ymn = Infinity, ymx = -Infinity, ysum = 0;
+      for (let i = 0; i < rec.n; i++) { xmn = Math.min(xmn, rec.x[i]); xmx = Math.max(xmx, rec.x[i]); ymn = Math.min(ymn, rec.y[i]); ymx = Math.max(ymx, rec.y[i]); ysum += rec.y[i]; }
+      ok(xmx - xmn > 1.85 && xmx - xmn < 2.35, 'xy: CH1(X) 에 핀 LPF 적용 (1 kHz → 진폭 약 0.7배)', 'X Vpp ' + (xmx - xmn).toFixed(3) + ' V (원신호 3.0 V)');
+      ok(Math.abs(ysum / rec.n) < 0.12 && ymx - ymn > 2.8, 'xy: CH2(Y) 에 AC 커플링 적용 (DC 제거)', 'Y avg ' + (ysum / rec.n).toFixed(3) + ' V, Vpp ' + (ymx - ymn).toFixed(3));
+    }
+    // (c) 위상차 / 진폭비 측정 (합성 신호)
+    {
+      const n = 10000, dt = 1e-6, f = 1234, x = new Float32Array(n), y = new Float32Array(n);
+      for (let i = 0; i < n; i++) { const w = 2 * Math.PI * f * i * dt; x[i] = 1.2 + Math.sin(w); y[i] = -0.4 + 0.5 * Math.sin(w - Math.PI / 6); }
+      const r = VS.xyPhase(x, y, n, dt, f);
+      ok(Math.abs(r.phase + 30) < 0.2 && Math.abs(r.gain - 0.5) < 0.005, 'xy: 위상차/진폭비 (합성 -30°, 0.5)', 'Δφ ' + r.phase.toFixed(3) + '° gain ' + r.gain.toFixed(4) + ' (' + r.periods + ' 주기)');
+    }
+    // (d) 예제: 리사주 원 / RC 위상
+    const runEx = (name, secs) => {
+      const ex = VS.EXAMPLES.find(e => e.name === name), st = ex.setup, sim = new VS.Simulator();
+      sim.setProbe(0, st.probes[0]); sim.setProbe(1, st.probes[1]);
+      if (st.filters) for (const k of Object.keys(st.filters)) sim.setFilter(+k, st.filters[k]);
+      sim.scope.setMode(st.mode);
+      Object.assign(sim.scope.s.xy, st.xy);
+      st.ch.forEach((c, i) => Object.assign(sim.scope.s.ch[i], c));
+      sim.runScript(ex.code, name);
+      step(sim, Math.round(secs / 0.004));
+      return sim;
+    };
+    {
+      const sim = runEx('09_xy_lissajous.lua', 0.1), rec = sim.scope.xyRecord();
+      let rmin = Infinity, rmax = 0;
+      for (let i = 0; i < rec.n; i++) { const r = Math.hypot(rec.x[i] - 1.65, rec.y[i] - 1.65); rmin = Math.min(rmin, r); rmax = Math.max(rmax, r); }
+      const ph = VS.xyPhase(rec.x, rec.y, rec.n, rec.dt, 200);
+      ok(rec.n === 5000 && rmin > 1.36 && rmax < 1.62 && Math.abs(ph.phase - 90) < 3, 'xy: 리사주 1:1 / 90° → 원 (반지름 1.5 V)', 'r ' + rmin.toFixed(3) + '~' + rmax.toFixed(3) + ' V, Δφ ' + ph.phase.toFixed(2) + '°');
+    }
+    {
+      const sim = runEx('10_xy_rc_phase.lua', 0.1), rec = sim.scope.xyRecord();
+      const W = { L: 0, R: (rec.n - 1) * rec.dt };
+      const m = VS.scopeMeasure({ t0: rec.t0, dt: rec.dt, n: rec.n, tRef: rec.t0, ch: [{ data: rec.x, vdiv: 0.5 }, null] }, 0, W.L, W.R);
+      const ph = VS.xyPhase(rec.x, rec.y, rec.n, rec.dt, m.freq);
+      const fc = 1 / (2 * Math.PI * 1600 * 100e-9), th = -Math.atan(1000 / fc) * 180 / Math.PI, g = 1 / Math.sqrt(1 + Math.pow(1000 / fc, 2));
+      ok(Math.abs(m.freq - 1000) < 5 && Math.abs(ph.phase - th) < 2.5 && Math.abs(ph.gain - g) < 0.03, 'xy: RC LPF 위상/진폭비 (이론 ' + th.toFixed(1) + '°, ' + g.toFixed(3) + ')',
+        'f ' + m.freq.toFixed(1) + ' Hz, Δφ ' + ph.phase.toFixed(2) + '°, gain ' + ph.gain.toFixed(4));
+    }
+    // (e) Probe 미연결 / 핀 Disable / 채널 OFF → 표시·획득 중단, 회복 시 새 궤적
+    {
+      const sim = new VS.Simulator();
+      sim.setProbe(0, 1); sim.setProbe(1, 3);
+      sim.scope.setMode('xy');
+      sim.runScript('pwm_start(PWM1, 5000, 30)\nwhile true do gpio_toggle(GPIO1) delay_us(70) end', 'script');
+      step(sim, 5);
+      const ep0 = sim.scope.xyBuf.epoch;
+      ok(sim.scope.status === 'XY' && sim.scope.xyBlock().length === 0, 'xy: 두 채널 정상 → 획득', sim.scope.status);
+      sim.setProbe(1, null); step(sim, 2);
+      const b1 = sim.scope.xyBlock();
+      ok(sim.scope.status === 'Hold' && !sim.scope.xyBuf && b1.length === 1 && b1[0].code === 'noprobe' && b1[0].ch === 1, 'xy: CH2 Probe 해제 → 표시 중단 (사유: Probe 미연결)', b1.map(b => b.text).join(', '));
+      sim.setProbe(1, 3); step(sim, 2);
+      ok(sim.scope.status === 'XY' && sim.scope.xyBuf && sim.scope.xyBuf.epoch > ep0, 'xy: Probe 재연결 → 새 궤적으로 재개', 'epoch ' + ep0 + ' → ' + (sim.scope.xyBuf && sim.scope.xyBuf.epoch));
+      sim.setEnabled(1, false); step(sim, 2);
+      const b2 = sim.scope.xyBlock();
+      ok(sim.scope.status === 'Hold' && b2.length === 1 && b2[0].code === 'disabled' && b2[0].ch === 0, 'xy: CH1 핀(GPIO1) Disable → 표시 중단', b2.map(b => b.text).join(', '));
+      sim.setEnabled(1, true); sim.scope.s.ch[1].on = false; step(sim, 2);
+      const b3 = sim.scope.xyBlock();
+      ok(sim.scope.status === 'Hold' && b3.length === 1 && b3[0].code === 'off', 'xy: CH2 채널 OFF → 표시 중단', b3.map(b => b.text).join(', '));
+      sim.scope.s.ch[1].on = true; step(sim, 2);
+      ok(sim.scope.status === 'XY', 'xy: 조건 회복 → 획득 재개');
+      // (f) Run / Stop: Stop 은 획득만 중단 (시뮬레이션 진행), Run 재개 시 새 궤적
+      const kStop = sim.scope.xyBuf.kLast, epS = sim.scope.xyBuf.epoch, tS = sim.simTime;
+      sim.scope.setRunning(false); step(sim, 5);
+      ok(sim.scope.xyBuf && sim.scope.xyBuf.kLast === kStop && sim.simTime > tS + 0.019, 'xy: STOP → 궤적 유지, 시뮬레이션은 진행', 'kLast 고정, sim +' + ((sim.simTime - tS) * 1e3).toFixed(1) + ' ms');
+      sim.scope.setRunning(true); step(sim, 1);
+      const Bn = sim.scope.xyBuf;
+      ok(Bn && Bn.epoch > epS && Bn.kStart > kStop, 'xy: RUN 재개 → Stop 구간은 획득하지 않고 새 궤적');
+      // (g) Single: 궤적 1개(Points) 획득 후 정지, 트리거 설정은 변경하지 않음
+      const tm = sim.scope.s.trig.mode;
+      sim.scope.s.xy.rl = 10000; sim.scope.single(); step(sim, 1, 0.002);
+      const midRun = sim.scope.running;
+      step(sim, 5, 0.002);
+      const Bs = sim.scope.xyBuf;
+      ok(midRun && !sim.scope.running && Bs.kLast - Bs.kStart + 1 >= 10000 && sim.scope.s.trig.mode === tm, 'xy: SINGLE → 10 kpts 획득 후 STOP', 'acquired ' + (Bs.kLast - Bs.kStart + 1));
+      // (h) CSV: Timestamp, CH1 Voltage (X), CH2 Voltage (Y)
+      const rec = sim.scope.xyRecord(), csv = VS.xyCSV(rec), lines = csv.trim().split('\n');
+      let csvOk = lines[0] === 'Timestamp (s),CH1 Voltage X (V),CH2 Voltage Y (V)' && lines.length === rec.n + 1;
+      for (let i = 1; i < lines.length && csvOk; i += 97) {
+        const c = lines[i].split(',').map(Number);
+        if (Math.abs(c[0] - (rec.k0 + i - 1) * rec.dt) > 1e-10 || Math.abs(c[1] - rec.x[i - 1]) > 1e-5 || Math.abs(c[2] - rec.y[i - 1]) > 1e-5) csvOk = false;
+      }
+      ok(csvOk, 'xy: CSV 저장 (Timestamp, CH1 X, CH2 Y)', lines.length - 1 + ' rows, 예: ' + lines[1]);
+      // (i) Y-T 복귀: 트리거 획득 재개, XY 전용 설정은 유지
+      sim.scope.setRunning(true);
+      sim.scope.setMode('yt'); sim.scope.s.trig.mode = 'normal'; sim.scope.s.trig.source = 1; sim.scope.s.tdiv = 100e-6;
+      const id0 = sim.scope.recId;
+      step(sim, 10);
+      const r2 = sim.scope.record;
+      ok(r2 && r2.kind === 'trig' && !r2.forced && sim.scope.recId > id0, 'xy → Y-T 전환 후 트리거 획득 정상', 'records +' + (sim.scope.recId - id0));
+      const yl = VS.ytCSV(r2).trim().split('\n');
+      ok(yl[0] === 'Timestamp (s),CH1 Voltage (V),CH2 Voltage (V)' && yl.length === r2.n + 1, 'Y-T: CSV 저장', (yl.length - 1) + ' rows');
+    }
+    // (j) 성능: 1 MSa/s 연속 XY 획득 (실시간 처리 가능 여부), MAX 속도 틱 예산
+    {
+      const sim = new VS.Simulator();
+      sim.setProbe(0, 5); sim.setProbe(1, 6); sim.setFilter(6, { type: 'LPF', R: 1600, C: 100e-9 });
+      sim.scope.setMode('xy');
+      sim.runScript(VS.EXAMPLES.find(e => e.name === '10_xy_rc_phase.lua').code, 'p.lua');
+      step(sim, 5);
+      let t0 = performance.now(); step(sim, 50); const dt1 = performance.now() - t0;
+      ok(dt1 < 200, 'perf: XY 1 MSa/s × 0.2 s 시뮬레이션 (DAC 50 kHz 스크립트 포함)', dt1.toFixed(0) + ' ms 실시간 (< 200 ms)');
+      sim.speed = 'max';
+      let worst = 0; const s0 = sim.simTime, r0 = performance.now();
+      for (let i = 0; i < 10; i++) { const a = performance.now(); sim._tick(); worst = Math.max(worst, performance.now() - a); }
+      ok(worst < 120 && sim.simTime > s0, 'perf: XY + MAX 속도 틱 예산', 'worst tick ' + worst.toFixed(1) + ' ms, ' + ((sim.simTime - s0) / ((performance.now() - r0) / 1000)).toFixed(1) + 'x realtime');
     }
   }
 } catch (e) { fail++; out.push('EXCEPTION ' + e + '\n' + e.stack); }

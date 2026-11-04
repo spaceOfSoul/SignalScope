@@ -62,6 +62,7 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.fillStyle = '#050607'; ctx.fillRect(0, 0, this.W, this.H);
       if (this.W < 50 || this.H < 50) return;
+      if (this.scope.isXY()) { this._renderXY(); return; }     // XY 모드 (scope_view_xy.js)
       const L = this.layout(); this.L = L;
       const rec = this.scope.record;
       for (const p of L.panels) {
@@ -345,12 +346,14 @@
       cv.addEventListener('wheel', (e) => {
         e.preventDefault();
         const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+        if (this.scope.isXY()) { this._xyWheel(x, y, e.deltaY < 0 ? 1 : -1); return; }
         const p = this._panelAt(x, y);
         if (!p) return;
         this.zoomStep(e.deltaY < 0 ? 1 : -1, p, x);
       }, { passive: false });
       cv.addEventListener('pointerdown', (e) => {
         const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+        if (this.scope.isXY()) { if (this._xyDown(x, y)) cv.setPointerCapture(e.pointerId); return; }
         const p = this._panelAt(x, y);
         if (!p) return;
         const s = this.scope.s;
@@ -368,6 +371,7 @@
       });
       cv.addEventListener('pointermove', (e) => {
         const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+        if (this.scope.isXY()) { this._xyMove(x, y); return; }
         const d = this.drag;
         if (!d) {
           const p = this._panelAt(x, y);
@@ -396,6 +400,7 @@
       cv.addEventListener('pointercancel', end);
       cv.addEventListener('dblclick', (e) => {
         const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+        if (this.scope.isXY()) { if (this._xyHit(x, y) && this.scope.s.xy.zoom.on) { this.scope.s.xy.zoom.on = false; this.app.scopeChanged('xyzoom'); } return; }
         const p = this._panelAt(x, y);
         if (p && p.kind === 'zoom') { this.scope.s.zoom.on = false; this.app.scopeChanged('zoom'); }
       });
