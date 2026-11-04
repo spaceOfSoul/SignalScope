@@ -1,4 +1,4 @@
-/* main.js — 앱 구성: 3개의 창, 상단 시뮬레이션 바, 렌더 루프(rAF), 설정 저장/복원, Autoset */
+/* main.js — 앱 구성: 3개의 창, 상단 시뮬레이션 바, 렌더 루프(rAF), 설정 저장/복원, Autoset, Y-T/XY 전환, CSV 저장 */
 (function (G) {
   'use strict';
   const VS = G.VS, UI = VS.ui, U = VS.util;
@@ -101,6 +101,38 @@
     togglePause() { this.sim.setPaused(!this.sim.paused); this.script.updateState(); this._updateTop(); }
     setSpeed(v) { this.sim.setSpeed(v); this._updateTop(); this.saveSoon(); }
 
+    /** 표시 형식 전환: 'yt' (X = 시간) / 'xy' (X = CH1, Y = CH2) */
+    setScopeMode(m) {
+      const sc = this.sim.scope;
+      if (sc.s.mode === m) return;
+      sc.setMode(m);
+      this.view.xyClearPersist();
+      this.panel.update(); this.saveSoon();
+      if (m === 'xy') {
+        const blk = sc.xyBlock();
+        UI.toast('XY 모드: X = CH1 전압, Y = CH2 전압 (Time/div · Edge Trigger 비활성)' + (blk.length ? ' — ⚠ ' + blk.map(b => b.text).join(', ') : ''), blk.length ? 'warn' : '');
+      } else UI.toast('Y-T 모드: X = 시간, Y = 전압');
+    }
+
+    /** 획득한 파형 CSV 저장 (Timestamp = Simulation Clock) */
+    saveCSV() {
+      const sc = this.sim.scope;
+      const stamp = (t) => 't' + t.toFixed(6) + 's';
+      if (sc.isXY()) {
+        const blk = sc.xyBlock();
+        if (blk.length) { UI.toast('XY 표시 중단 상태 — ' + blk.map(b => b.text).join(', '), 'warn'); return; }
+        const rec = sc.xyRecord();
+        if (!rec || !rec.n) { UI.toast('저장할 XY 데이터가 없습니다.', 'warn'); return; }
+        UI.download('xy_' + stamp(rec.tEnd) + '.csv', VS.xyCSV(rec), 'text/csv');
+        UI.toast('XY CSV 저장: ' + rec.n + ' pts (Timestamp, CH1 Voltage X, CH2 Voltage Y)');
+      } else {
+        const rec = sc.record;
+        if (!rec || (!rec.ch[0] && !rec.ch[1])) { UI.toast('저장할 파형이 없습니다.', 'warn'); return; }
+        UI.download('yt_' + stamp(rec.t0 + (rec.n - 1) * rec.dt) + '.csv', VS.ytCSV(rec), 'text/csv');
+        UI.toast('Y-T CSV 저장: ' + rec.n + ' pts');
+      }
+    }
+
     /** 스코프 설정 변경 알림 */
     scopeChanged(kind) {
       if (kind === 'horiz' || kind === 'trig' || kind === 'acq') this.sim.scope.rearm();
@@ -114,6 +146,7 @@
       for (let c = 0; c < 2; c++) this.sim.setCoupling(c, s.ch[c].coupling);
       this.sim.scope.setRunning(true);
       this.sim.scope.rearm();
+      this.view.xyClearPersist();
       this.panel.update(); this.saveSoon();
       UI.toast('오실로스코프 기본 설정');
     }
@@ -141,34 +174,80 @@
       s.delay = 0; s.zoom.on = false; s.zoom.center = 0;
       Object.assign(s.trig, d.trig, st.trig || {});
       s.acq.mode = (st.acq && st.acq.mode) || 'sample';
+      sim.scope.setMode(st.mode === 'xy' ? 'xy' : 'yt');
+      Object.assign(s.xy, { sr: d.xy.sr, rl: d.xy.rl, draw: d.xy.draw, persist: d.xy.persist }, st.xy || {});
+      s.xy.zoom = Object.assign({}, d.xy.zoom);
+      this.view.xyClearPersist();
       sim.scope.setRunning(true);
       sim.scope.rearm();
       this.pins.refresh(); this.panel.update(); this.saveSoon();
     }
 
+    /** 최근 span 초 동안의 채널 신호 범위/주기 (Autoset 용) */
+    _probeSignal(c, span) {
+      const sim = this.sim, t = sim.simTime;
+      const tl = sim.inputs[c].tl, N = 4000;
+      const mn = new Float64Array(N), mx = new Float64Array(N);
+      tl.samplePeak(t - span, span / N, N, mn, mx);
+      let vmin = Infinity, vmax = -Infinity;
+      for (let i = 0; i < N; i++) { if (mn[i] < vmin) vmin = mn[i]; if (mx[i] > vmax) vmax = mx[i]; }
+      let period = NaN;
+      if (vmax - vmin > 0.02) {
+        const mid = (vmin + vmax) / 2, rises = [];
+        let tc = t - span;
+        for (let k = 0; k < 400; k++) { const r = tl.findCrossing(tc, t, mid, true); if (r < 0) break; rises.push(r); tc = r; }
+        if (rises.length >= 3) period = (rises[rises.length - 1] - rises[0]) / (rises.length - 1);
+        else if (rises.length === 2) period = rises[1] - rises[0];
+      }
+      return { vmin: vmin, vmax: vmax, period: period, mid: (vmin + vmax) / 2 };
+    }
+
+    /** AUTOSET (XY): X(CH1) · Y(CH2) V/div 와 Position 을 신호 범위에 맞추고, 궤적 길이를 신호 주기에 맞춤 */
+    _autosetXY() {
+      const sim = this.sim, sc = sim.scope, s = sc.s, t = sim.simTime;
+      const span = Math.min(0.25, t);
+      if (span < 1e-6) { UI.toast('신호 이력이 부족합니다. 잠시 후 다시 시도하세요.', 'warn'); return; }
+      if (!sim.probes[0] || !sim.probes[1]) { UI.toast('XY 모드는 CH1, CH2 모두 Probe 연결이 필요합니다 (창 1)', 'warn'); return; }
+      const info = [this._probeSignal(0, span), this._probeSignal(1, span)];
+      const target = [8.5, 6.5];      // X 축 10 div 중 ≤ 8.5 div, Y 축 8 div 중 ≤ 6.5 div (ADC 범위 ±5.12 div 이내)
+      for (const c of [0, 1]) {
+        const cs = s.ch[c], x = info[c];
+        cs.on = true;
+        const list = VS.Scope.vdivList(cs.probe);
+        const vpp = Math.max(x.vmax - x.vmin, 0.02);
+        let vd = list[list.length - 1];
+        for (const v of list) if (vpp / v <= target[c]) { vd = v; break; }
+        cs.vdiv = vd;
+        cs.pos = U.clamp(Math.round((-x.mid / vd) * 25) / 25, -8, 8);
+        if (cs.coupling === 'GND') sim.setCoupling(c, 'DC');
+      }
+      const per = info.map(x => x.period).filter(p => p === p && p > 0);
+      let msg = '';
+      if (per.length) {
+        // 궤적 길이 ≥ 느린 신호 2 주기, 샘플 간격 ≤ 빠른 신호 주기 / 50
+        const W = 2 * Math.max.apply(null, per), pMin = Math.min.apply(null, per);
+        const SR = VS.Scope.XY_SR_LIST, RL = VS.Scope.XY_RL_LIST;
+        const fsFor = (n) => SR.filter(v => n / v >= W * 0.999).pop() || SR[0];    // 궤적 ≥ W 인 최대 샘플레이트
+        let rl = RL.find(n => fsFor(n) >= 50 / pMin * 0.999) || RL[RL.length - 1];
+        const fs = fsFor(rl);
+        s.xy.sr = fs; s.xy.rl = rl;
+        msg = ' — 궤적 ' + U.fmtEng(rl / fs, 's', 3) + ' (' + U.fmtEng(fs, 'Sa/s') + ' × ' + U.fmtEng(rl, 'pts') + ')';
+      }
+      s.xy.zoom.on = false;
+      sc.setRunning(true);
+      this.view.xyClearPersist();
+      this.panel.update(); this.saveSoon();
+      UI.toast('AUTOSET (XY) 완료' + msg);
+    }
+
     /** AUTOSET: 최근 신호로부터 V/div, Time/div, 트리거 자동 설정 */
     autoset() {
+      if (this.sim.scope.isXY()) { this._autosetXY(); return; }
       const sim = this.sim, s = sim.scope.s, t = sim.simTime;
       const span = Math.min(0.25, t);
       if (span < 1e-6) { UI.toast('신호 이력이 부족합니다. 잠시 후 다시 시도하세요.', 'warn'); return; }
       const info = [];
-      for (let c = 0; c < 2; c++) {
-        if (!sim.probes[c]) { info.push(null); continue; }
-        const tl = sim.inputs[c].tl, N = 4000;
-        const mn = new Float64Array(N), mx = new Float64Array(N);
-        tl.samplePeak(t - span, span / N, N, mn, mx);
-        let vmin = Infinity, vmax = -Infinity;
-        for (let i = 0; i < N; i++) { if (mn[i] < vmin) vmin = mn[i]; if (mx[i] > vmax) vmax = mx[i]; }
-        let period = NaN;
-        if (vmax - vmin > 0.02) {
-          const mid = (vmin + vmax) / 2, rises = [];
-          let tc = t - span;
-          for (let k = 0; k < 400; k++) { const r = tl.findCrossing(tc, t, mid, true); if (r < 0) break; rises.push(r); tc = r; }
-          if (rises.length >= 3) period = (rises[rises.length - 1] - rises[0]) / (rises.length - 1);
-          else if (rises.length === 2) period = rises[1] - rises[0];
-        }
-        info.push({ vmin: vmin, vmax: vmax, period: period, mid: (vmin + vmax) / 2 });
-      }
+      for (let c = 0; c < 2; c++) info.push(sim.probes[c] ? this._probeSignal(c, span) : null);
       const act = info.map((x, c) => x ? c : -1).filter(c => c >= 0);
       if (!act.length) { UI.toast('Probe 가 연결된 채널이 없습니다 (창 1)', 'warn'); return; }
       const target = act.length === 2 ? 3.0 : 6.0;

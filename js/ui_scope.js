@@ -1,4 +1,4 @@
-/* ui_scope.js — 창 3: 오실로스코프 전면 패널 (Vertical / Horizontal / Trigger / Acquire / Display) */
+/* ui_scope.js — 창 3: 오실로스코프 전면 패널 (Display Format(Y-T/XY) / XY / Vertical / Horizontal / Trigger / Acquire / Display) */
 (function (G) {
   'use strict';
   const VS = G.VS, UI = VS.ui, U = VS.util;
@@ -29,10 +29,55 @@
       this.bRun = UI.el('button', { id: 'btnRun', text: 'RUN', title: 'Run/Stop: 획득 시작/중지 (Stop 은 계측기 획득만 중단, 보드 시뮬레이션은 계속)', onclick: () => { this.scope.setRunning(!this.scope.running); if (this.s.trig.mode === 'single' && this.scope.running) this.scope.avg = null; this.update(); this.app.saveSoon(); } });
       this.bSingle = UI.el('button', { id: 'btnSingle', text: 'SINGLE', title: 'Single: 트리거 1회 만족 시 획득 후 정지', onclick: () => { this.scope.single(); this.update(); this.app.saveSoon(); } });
       const bAuto = UI.el('button', { text: 'AUTOSET', title: '연결된 신호에 맞춰 V/div, Time/div, 트리거를 자동 설정', onclick: () => this.app.autoset() });
-      const bForce = UI.el('button', { text: 'FORCE', title: '강제 트리거', onclick: () => this.scope.forceTrigger() });
+      this.bForce = UI.el('button', { text: 'FORCE', title: '강제 트리거 (XY 모드에서는 비활성)', onclick: () => this.scope.forceTrigger() });
       const bDef = UI.el('button', { text: 'DEFAULT', title: '스코프 기본 설정으로 초기화', onclick: () => this.app.scopeDefault() });
-      const bClr = UI.el('button', { text: 'CLEAR', title: '화면/평균 버퍼 지우기', onclick: () => { this.scope.record = null; this.scope.avg = null; this.scope.rollState = null; } });
-      this.el.appendChild(UI.el('div', { class: 'runbtns' }, [this.bRun, this.bSingle, bAuto, bForce, bDef, bClr]));
+      const bClr = UI.el('button', {
+        text: 'CLEAR', title: '화면/평균 버퍼 지우기 (XY: 궤적/잔상 지우기)', onclick: () => {
+          this.scope.record = null; this.scope.avg = null; this.scope.rollState = null; this.scope.xyBuf = null; this.app.view.xyClearPersist();
+        }
+      });
+      this.el.appendChild(UI.el('div', { class: 'runbtns' }, [this.bRun, this.bSingle, bAuto, this.bForce, bDef, bClr]));
+
+      // ---------- 표시 형식: Y-T / XY ----------
+      const msec = this._sec('Display Format');
+      this.segs.mode = UI.seg([{ v: 'yt', label: 'Y-T', title: 'Y-T 모드: X축 = 시간, Y축 = 전압' }, { v: 'xy', label: 'XY', title: 'XY 모드: X축 = CH1 전압, Y축 = CH2 전압 (동일 시점 샘플 쌍)' }],
+        this.s.mode, (v) => this.app.setScopeMode(v));
+      this.modeHint = UI.el('span', { class: 'hint' });
+      msec.appendChild(this._row('Mode', [this.segs.mode.el, this.modeHint]));
+
+      // ---------- XY ----------
+      const xsec = this.secXY = this._sec('XY Mode');
+      xsec.classList.add('xysec');
+      const X0 = this.s.xy;
+      this.segs.xydraw = UI.seg([
+        { v: 'line', label: 'Line', title: '연속된 측정 좌표를 시간 순서대로 선으로 연결' },
+        { v: 'dot', label: 'Dot', title: '측정 좌표를 점으로 표시' },
+        { v: 'persist', label: 'Persistence', title: '이전 측정 좌표의 궤적을 일정 시간 유지하거나 누적 표시' }],
+        X0.draw, (v) => { this.s.xy.draw = v; this.ch('xydisp'); });
+      this.xyPersistSel = UI.select(SC.XY_PERSIST_LIST.map(v => ({ v: v, label: v < 0 ? '∞ 무한 누적' : U.fmtEng(v, 's') + ' 유지' })), X0.persist,
+        (v) => { this.s.xy.persist = +v; this.ch('xydisp'); }, { title: '잔상 유지 시간 (Simulation Clock 기준 — Pause/Stop 중에는 잔상도 정지) / ∞ = 무한 누적(밀도 표시)' });
+      const bPClr = UI.el('button', { text: '잔상 지우기', onclick: () => this.app.view.xyClearPersist() });
+      this.xySrSel = UI.select(SC.XY_SR_LIST.map(v => ({ v: v, label: U.fmtEng(v, 'Sa/s') })), X0.sr,
+        (v) => { this.s.xy.sr = +v; this.ch('xyacq'); }, { title: 'XY Sample Rate: CH1/CH2 를 동일 시각에 샘플링하는 주기 (Simulation Clock)' });
+      this.xyRlSel = UI.select(SC.XY_RL_LIST.map(v => ({ v: v, label: U.fmtEng(v, 'pts') })), X0.rl,
+        (v) => { this.s.xy.rl = +v; this.ch('xyacq'); }, { title: '궤적에 표시할 점 수 (궤적 길이 = 점 수 / Sample Rate)' });
+      this.k.xyzoom = new UI.Knob({
+        label: 'Zoom ×', title: 'XY Zoom (화면 휠과 동일)', onStep: (d) => { this.app.view.xyZoomStep(d); this.update(); },
+        onReset: () => { this.s.xy.zoom.on = false; this.ch('xyzoom'); }
+      });
+      this.bXyZoom = UI.el('button', {
+        text: 'Zoom', onclick: () => {
+          const z = this.s.xy.zoom; z.on = !z.on; if (z.factor < 2) z.factor = 2; this.app.view.xyClampZoom(); this.ch('xyzoom');
+        }
+      });
+      const bXyZc = UI.el('button', { text: 'Zoom 중심 → 0', title: 'Zoom 영역을 화면 중앙으로', onclick: () => { this.s.xy.zoom.cx = 0; this.s.xy.zoom.cy = 0; this.ch('xyzoom'); } });
+      const bXyPos = UI.el('button', { text: 'Position → 0', title: 'CH1(X), CH2(Y) Position = 0 (0 V 가 화면 중앙)', onclick: () => { this.s.ch[0].pos = 0; this.s.ch[1].pos = 0; this.ch('vert'); } });
+      this.xyInfo = UI.el('div', { class: 'acqinfo' });
+      this.xyWarn = UI.el('div', { class: 'xywarn' });
+      xsec.append(this._row('Draw', [this.segs.xydraw.el]), this._row('Persist', [this.xyPersistSel, bPClr]),
+        this._row('Rate', [this.xySrSel]), this._row('Points', [this.xyRlSel]),
+        UI.el('div', { class: 'sp-knobs' }, [this.k.xyzoom.el, UI.el('div', { style: 'display:flex;flex-direction:column;gap:4px;justify-content:center' }, [this.bXyZoom, bXyZc, bXyPos])]),
+        this.xyInfo, this.xyWarn);
 
       // ---------- VERTICAL ----------
       const vsec = this._sec('Vertical');
@@ -72,7 +117,8 @@
       }
 
       // ---------- HORIZONTAL ----------
-      const hsec = this._sec('Horizontal');
+      const secNote = () => UI.el('span', { class: 'secnote', text: 'XY 모드: 비활성' });
+      const hsec = this.secH = this._sec('Horizontal', [secNote()]);
       this.k.tdiv = new UI.Knob({
         label: 'Time/div', onStep: (d) => {
           const L = SC.TDIV_LIST, i = U.clamp(U.nearestIndex(L, this.s.tdiv) - d, 0, L.length - 1);
@@ -102,7 +148,7 @@
         UI.el('button', { text: 'Zoom Pos → 0', onclick: () => { this.s.zoom.center = 0; this.ch('zoom'); } })]));
 
       // ---------- TRIGGER ----------
-      const tsec = this._sec('Trigger');
+      const tsec = this.secT = this._sec('Trigger', [secNote()]);
       this.k.lvl = new UI.Knob({
         label: 'Level', color: '#ff9a3c', onStep: (d, fine) => {
           const cs = this.s.ch[this.s.trig.source];
@@ -127,7 +173,7 @@
       tsec.append(this._row('Mode', [this.segs.tmode.el]), this._row('Source', [this.segs.tsrc.el, UI.el('span', { class: 'hint', text: 'Edge' })]), this._row('Slope', [this.segs.tslope.el]));
 
       // ---------- ACQUIRE ----------
-      const asec = this._sec('Acquire');
+      const asec = this.secA = this._sec('Acquire', [secNote()]);
       this.segs.amode = UI.seg([{ v: 'sample', label: 'Sample' }, { v: 'peak', label: 'Peak Det', title: '샘플 간격 내 최소/최대 보존 (짧은 펄스 표시)' }, { v: 'average', label: 'Average' }],
         this.s.acq.mode, (v) => { this.s.acq.mode = v; this.scope.avg = null; this.ch('acq'); });
       this.avgSel = UI.select(SC.AVG_LIST.map(v => ({ v: v, label: v + '회' })), this.s.acq.avgN, (v) => { this.s.acq.avgN = +v; this.scope.avg = null; this.ch('acq'); }, { title: '평균 횟수' });
@@ -146,8 +192,11 @@
       this.segs.vec = UI.seg([{ v: true, label: 'Vectors' }, { v: false, label: 'Dots' }], this.s.display.vectors, (v) => { this.s.display.vectors = v; this.ch('disp'); });
       this.segs.noise = UI.seg([{ v: true, label: 'On' }, { v: false, label: 'Off' }], this.s.display.noise, (v) => { this.s.display.noise = v; this.ch('disp'); });
       this.segs.meas = UI.seg([{ v: true, label: 'On' }, { v: false, label: 'Off' }], this.s.display.measure, (v) => { this.s.display.measure = v; this.ch('disp'); });
-      dsec.append(this._row('Draw', [this.segs.vec.el]), this._row('Noise', [this.segs.noise.el, UI.el('span', { class: 'hint', text: 'ADC 입력 잡음' })]), this._row('Measure', [this.segs.meas.el]));
-      dsec.appendChild(UI.el('div', { class: 'hint', style: 'margin-top:4px', html: '화면 조작: <b>휠</b>=Zoom · <b>드래그</b>=수평 위치/Zoom 위치 · 우측 <b>T</b> 마커 드래그=트리거 레벨 · 좌측 채널 마커 드래그=수직 위치 · Zoom 창 더블클릭=Zoom 해제' }));
+      const bCsv = UI.el('button', { text: '⤓ CSV 저장', title: '획득한 파형을 CSV 파일로 저장\nY-T: Timestamp, CH1, CH2 (Peak Detect: Min/Max)\nXY: Timestamp, CH1 Voltage (X), CH2 Voltage (Y)', onclick: () => this.app.saveCSV() });
+      dsec.append(this._row('Draw', [this.segs.vec.el, UI.el('span', { class: 'hint', text: 'Y-T' })]), this._row('Noise', [this.segs.noise.el, UI.el('span', { class: 'hint', text: 'ADC 입력 잡음' })]), this._row('Measure', [this.segs.meas.el]),
+        this._row('Save', [bCsv, UI.el('span', { class: 'hint', text: 'Timestamp = Simulation Clock' })]));
+      this.dispHint = UI.el('div', { class: 'hint', style: 'margin-top:4px' });
+      dsec.appendChild(this.dispHint);
       this.update();
     }
 
@@ -165,20 +214,48 @@
       if (lvl !== null && isFinite(lvl)) { this.s.trig.level = Number(lvl.toPrecision(4)); this.app.view.flashLevel(); this.ch('trig'); }
     }
 
+    _updateXY() {
+      const s = this.s, sc = this.scope, X = s.xy, XH = sc.xyHoriz();
+      this.segs.xydraw.set(X.draw);
+      this.xyPersistSel.value = String(X.persist); this.xyPersistSel.disabled = X.draw !== 'persist';
+      this.xySrSel.value = String(X.sr); this.xyRlSel.value = String(X.rl);
+      this.k.xyzoom.set(X.zoom.on ? '×' + X.zoom.factor : 'off');
+      this.bXyZoom.classList.toggle('on', X.zoom.on);
+      const html = 'Sample Rate <b>' + U.fmtEng(XH.fs, 'Sa/s', 4) + '</b> · Points <b>' + U.fmtEng(XH.n, 'pts', 4) + '</b><br>' +
+        '궤적 길이 = ' + U.fmtEng(XH.n, 'pts', 4) + ' / ' + U.fmtEng(XH.fs, 'Sa/s', 4) + ' = <b>' + U.fmtEng(XH.W, 's', 4) + '</b><br>' +
+        'CH1·CH2 동일 시각 t<sub>k</sub> = k / fs 샘플링 (Simulation Clock)';
+      if (this._xyHtml !== html) { this.xyInfo.innerHTML = html; this._xyHtml = html; }
+      const blk = sc.xyBlock();
+      const wh = blk.length ? '<b>⚠ XY 표시 중단</b><br>' + blk.map(b => '· ' + U.escapeHtml(b.text)).join('<br>') : '';
+      if (this._xyWarnHtml !== wh) { this.xyWarn.innerHTML = wh; this._xyWarnHtml = wh; }
+    }
+
     update() {
-      const s = this.s, sc = this.scope;
+      const s = this.s, sc = this.scope, xy = s.mode === 'xy';
       this.bRun.textContent = sc.running ? 'RUN' : 'STOP';
       this.bRun.className = sc.running ? 'running' : 'stopped';
-      this.bSingle.classList.toggle('armed', s.trig.mode === 'single' && sc.running);
+      this.bSingle.classList.toggle('armed', sc.running && (xy ? sc.xySingle : s.trig.mode === 'single'));
+      this.bSingle.title = xy ? 'Single (XY): 궤적 1개(Points 만큼) 획득 후 정지' : 'Single: 트리거 1회 만족 시 획득 후 정지';
+      this.segs.mode.set(s.mode);
+      this.modeHint.textContent = xy ? 'X = CH1, Y = CH2' : 'X = 시간, Y = 전압';
+      this.secXY.style.display = xy ? '' : 'none';
+      for (const sec of [this.secH, this.secT, this.secA]) sec.classList.toggle('disabled', xy);
+      this.bForce.disabled = xy;
+      this.segs.vec.enable(!xy);
+      if (xy) this._updateXY();
+      const dh = xy
+        ? '화면 조작 (XY): <b>휠</b>=Zoom · <b>드래그</b>=X/Y Position 이동 (Zoom 시 확대 영역 이동) · 좌측 <b>2</b> / 하단 <b>1</b> 마커 드래그=CH2(Y) / CH1(X) Position · 오버뷰 클릭=Zoom 위치 · 더블클릭=Zoom 해제'
+        : '화면 조작: <b>휠</b>=Zoom · <b>드래그</b>=수평 위치/Zoom 위치 · 우측 <b>T</b> 마커 드래그=트리거 레벨 · 좌측 채널 마커 드래그=수직 위치 · Zoom 창 더블클릭=Zoom 해제';
+      if (this._dispHtml !== dh) { this.dispHint.innerHTML = dh; this._dispHtml = dh; }
       for (let c = 0; c < 2; c++) {
         const u = this.chUI[c], cs = s.ch[c];
         u.btn.classList.toggle('on', cs.on);
         u.btn.textContent = 'CH' + (c + 1) + (cs.on ? ' ON' : ' OFF');
         const lbl = this.sim.inputs[c].label;
-        u.pin.textContent = lbl === '—' ? 'probe 없음' : '← ' + lbl;
+        u.pin.textContent = (lbl === '—' ? 'probe 없음' : '← ' + lbl) + (xy ? (c === 0 ? ' · X축' : ' · Y축') : '');
         u.kv.set(U.fmtEng(cs.vdiv, 'V', 3) + '/div');
         u.kp.set((cs.pos >= 0 ? '+' : '') + cs.pos.toFixed(2) + 'div');
-        u.kp.knob.title = 'Vertical Position (Offset): ' + U.fmtEng(-cs.pos * cs.vdiv, 'V', 3) + ' 이 화면 중앙';
+        u.kp.knob.title = (xy && c === 0 ? 'X Position (수평 Offset): ' : 'Vertical Position (Offset): ') + U.fmtEng(-cs.pos * cs.vdiv, 'V', 3) + ' 이 화면 중앙';
         u.cpl.set(cs.coupling); u.prb.set(cs.probe);
       }
       this.k.tdiv.set(U.fmtEng(s.tdiv, 's') + '/div');

@@ -212,3 +212,11 @@ td.out { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
 .knob-wrap .karrows button { padding: 0 6px; height: 16px; line-height: 14px; font-size: 10px; }
 .acqinfo { font: 11px/1.45 var(--mono); color: #b8c7da; background: #1f2329; border-radius: 4px; padding: 4px 6px; margin-top: 4px; }
 .acqinfo b { color: #fff; font-weight: 600; }
+/* XY 모드: 비활성 섹션 / 경고 */
+.sp-sec .secnote { display: none; margin-left: auto; font: 500 10.5px var(--ui); letter-spacing: 0; text-transform: none; color: #f5c56a; }
+.sp-sec.disabled .secnote { display: inline; }
+.sp-sec.disabled > :not(h5) { opacity: .36; pointer-events: none; filter: grayscale(.7); }
+.sp-sec.xysec { border-color: #3f7356; background: #28332d; }
+.sp-sec.xysec > h5 { color: #9fe8b4; }
+.xywarn { font: 11.5px/1.45 var(--mono); color: #ffc6c6; background: #3a1717; border: 1px solid #7a2a2a; border-radius: 4px; padding: 4px 6px; margin-top: 4px; }
+.xywarn:empty { display: none; }
