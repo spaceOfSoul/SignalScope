@@ -318,6 +318,170 @@ for n in every(1 / fs) do
   end
 end
 `
+    },
+    {
+      name: '11_net_http_frames.lua', title: '11 네트워크(HTTP): 서버 프레임 → XY 산점도 재생',
+      setup: {
+        probes: [5, 6], mode: 'xy', cpi: 0,
+        ch: [{ vdiv: 0.5, pos: -3.3 }, { vdiv: 0.5, pos: -3.3 }], xy: { sr: 500e3, rl: 20000, draw: 'dot' }
+      },
+      code: String.raw`-- HTTP 로 서버에서 프레임(점 집합)을 받아 XY 모드 산점도로 재생
+--  서버 실행 (저장소 루트에서):
+--    python tools/signal_server.py --demo                      ← 데모 프레임 (의존성 없음)
+--    python tools/signal_server.py --parquet points.parquet    ← parquet (pip install pyarrow numpy)
+--  DAC1 → CH1 (X), DAC2 → CH2 (Y).  XY 표시: Dot, 표시 길이 rl/sr = 20000 / 500 kSa/s = 40 ms (25 fps 1 프레임)
+--
+--  * 시뮬레이션 시계는 네트워크와 무관하게 계속 흐른다.
+--    프레임 주기마다 다음 프레임이 도착했으면 교체하고, 아직이면 이전 프레임을 계속 그린다(유지).
+--  * 응답 지연은 미리 여러 프레임을 요청해 두어(AHEAD) 숨긴다. http_request() 는 즉시 반환된다.
+--  * 이 예제는 CPI = 0 (이상적 0-시간 실행) 으로 설정된다: 파싱 시간 동안 빔이 멈추거나,
+--    X/Y 두 DAC 쓰기 사이의 명령어 시간 때문에 엉뚱한 점(유령 점)이 찍히지 않게 하기 위함.
+local BASE = "http://127.0.0.1:8000"
+local AHEAD = 8                       -- 미리 요청해 둘 프레임 수
+
+local function parse_info(s)
+  local t = {}
+  for k, v in s:gmatch("([%w_]+)=([^\r\n]*)") do t[k] = tonumber(v) or v end
+  return t
+end
+local function parse_frame(s)         -- "x1,y1,x2,y2,..." → {x1, y1, x2, y2, ...}, 점 수
+  local t, n = {}, 0
+  for v in s:gmatch("%d+") do n = n + 1; t[n] = tonumber(v) end
+  return t, n // 2
+end
+
+-- 1) 서버 정보 (연결될 때까지 1 초마다 재시도: 그동안에도 시뮬레이션은 진행)
+local info
+while not info do
+  local body, st = http_get(BASE .. "/api/info", { timeout = 2 })
+  if body and st == 200 then info = parse_info(body)
+  else
+    printf("서버 응답 없음 (%s) → 'python tools/signal_server.py --demo' 실행 후 자동 재시도", tostring(st))
+    sleep(1)
+  end
+end
+local FRAMES, FPS = info.frames, info.fps
+printf("서버: %d 프레임, %g fps, 최대 %d 점  [%s]", FRAMES, FPS, info.max_points or 0, tostring(info.source))
+
+-- 2) 요청 파이프라인: pending[k] = 프레임 k 요청
+local pending, nreq = {}, 0
+local function request_upto(last)
+  while nreq <= last do
+    pending[nreq] = http_request(BASE .. "/api/frame/" .. (nreq % FRAMES))
+    nreq = nreq + 1
+  end
+end
+
+-- 3) 재생
+local FRAME_T = 1 / FPS
+local cur, npts = nil, 0
+local k, shown, held = 0, 0, 0
+local t_frame = sim_time()
+local t_report = t_frame + 5
+while true do
+  request_upto(k + AHEAD)
+  local r = pending[k]
+  if r:ready() then                   -- 도착: 다음 프레임으로 교체
+    local body, st = r:result()
+    pending[k] = nil
+    if body and st == 200 then cur, npts = parse_frame(body)
+    else printf("frame %d 실패: %s", k, tostring(st)) end
+    k = k + 1; shown = shown + 1
+  else
+    held = held + 1                   -- 미도착: 이전 프레임 유지
+  end
+  t_frame = t_frame + FRAME_T
+  if cur and npts > 0 then            -- 이번 프레임 시간 동안 현재 프레임을 그린다
+    local t0 = sim_time()
+    local dwell = (t_frame - t0) / npts
+    for i = 1, npts do
+      dac_write(DAC1, cur[2 * i - 1]); dac_write(DAC2, cur[2 * i])
+      wait_until(t0 + i * dwell)
+    end
+  else
+    wait_until(t_frame)
+  end
+  if sim_time() >= t_report then
+    printf("표시 %d 프레임 (현재 #%d, %d 점), 유지(미도착) %d 회", shown, (k - 1) % FRAMES, npts, held)
+    t_report = t_report + 5
+  end
+end
+`
+    },
+    {
+      name: '12_net_ws_stream.lua', title: '12 네트워크(WebSocket): 실시간 프레임 스트림 수신',
+      setup: {
+        probes: [5, 6], mode: 'xy', cpi: 0,
+        ch: [{ vdiv: 0.5, pos: -3.3 }, { vdiv: 0.5, pos: -3.3 }], xy: { sr: 500e3, rl: 20000, draw: 'dot' }
+      },
+      code: String.raw`-- WebSocket 으로 서버가 밀어주는 실시간 프레임 스트림을 받아 XY 모드로 표시
+--  서버 실행: python tools/signal_server.py --demo   (또는 --parquet ...)
+--  서버는 실제 시간 기준 fps 로 프레임을 보낸다 (라이브 데이터 소스 가정).
+--
+--  * 시뮬레이션 시계는 계속 흐른다. 스크립트는 현재 프레임을 반복해서 그리다가,
+--    한 바퀴 그릴 때마다 쌓인 메시지를 확인해 가장 최신 프레임으로 교체한다.
+--    (늦게 처리해 밀린 프레임은 버림: 시뮬레이션 속도가 0.1X 처럼 느리면 많이 버려지고,
+--     MAX 처럼 빠르면 같은 프레임이 여러 번 그려진다)
+--  * UDP/TCP 로 데이터를 보내는 프로그램이 있다면: 서버를 --udp-port / --tcp-port 로 실행하고
+--    URL 을 ws://127.0.0.1:8000/relay 로 바꾸면 받은 데이터가 메시지 그대로 전달된다.
+local URL = "ws://127.0.0.1:8000/ws"
+
+local function parse_info(s)
+  local t = {}
+  for k, v in s:gmatch("([%w_]+)=([^\r\n]*)") do t[k] = tonumber(v) or v end
+  return t
+end
+local function parse_frame(s)
+  local t, n = {}, 0
+  for v in s:gmatch("%d+") do n = n + 1; t[n] = tonumber(v) end
+  return t, n // 2
+end
+
+local ws
+while not ws do
+  local err
+  ws, err = ws_open(URL, { timeout = 2 })
+  if not ws then
+    printf("WebSocket 연결 실패 (%s) → 'python tools/signal_server.py --demo' 실행 후 자동 재시도", tostring(err))
+    sleep(1)
+  end
+end
+ws:send("info")
+local info = parse_info(ws:recv(2) or "")
+local FPS = info.fps or 25
+printf("연결됨: %s (%s fps, %s 프레임)", URL, tostring(info.fps), tostring(info.frames))
+ws:send("stream 0 0")                 -- 0 번부터 끝없이 (서버 fps 로 push)
+
+local DRAW_T = 1 / FPS                -- 한 바퀴 그리는 시간
+local cur, npts = nil, 0
+local recvd, skipped = 0, 0
+local t_report = sim_time() + 5
+while true do
+  -- 쌓인 메시지 중 최신 것만 사용
+  local latest, m = nil, ws:poll()
+  while m do
+    if latest then skipped = skipped + 1 end
+    latest = m; recvd = recvd + 1
+    m = ws:poll()
+  end
+  if latest then cur, npts = parse_frame(latest) end
+  if ws:state() == "closed" then printf("연결 종료: %s", tostring(ws:error())) break end
+  if cur and npts > 0 then
+    local t0 = sim_time()
+    local dwell = DRAW_T / npts
+    for i = 1, npts do
+      dac_write(DAC1, cur[2 * i - 1]); dac_write(DAC2, cur[2 * i])
+      wait_until(t0 + i * dwell)
+    end
+  else
+    sleep(DRAW_T)
+  end
+  if sim_time() >= t_report then
+    printf("수신 %d 프레임 (버림 %d), 현재 %d 점", recvd, skipped, npts)
+    t_report = t_report + 5
+  end
+end
+`
     }
   ];
 })(window);

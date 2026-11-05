@@ -171,6 +171,9 @@
         if (cs.coupling !== 'DC') sim.setCoupling(c, 'DC');
       });
       if (st.tdiv) s.tdiv = st.tdiv;
+      // 명령어 실행시간(CPI): 예제가 지정하지 않으면 기본값(1)
+      const cpi = st.cpi !== undefined ? st.cpi : 1;
+      sim.setCPI(cpi); this.script.cpiSel.value = String(cpi);
       s.delay = 0; s.zoom.on = false; s.zoom.center = 0;
       Object.assign(s.trig, d.trig, st.trig || {});
       s.acq.mode = (st.acq && st.acq.mode) || 'sample';

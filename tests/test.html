@@ -6,6 +6,7 @@
 <script src="../js/signal.js"></script>
 <script src="../js/board.js"></script>
 <script src="../js/vfs.js"></script>
+<script src="../js/net.js"></script>
 <script src="../js/lua_prelude.js"></script>
 <script src="../js/lua_runtime.js"></script>
 <script src="../js/scope.js"></script>
@@ -314,6 +315,7 @@ try {
       if (st.mode) sim.scope.setMode(st.mode);
       if (st.xy) Object.assign(sim.scope.s.xy, st.xy);
       if (st.ch) st.ch.forEach((c, i) => Object.assign(sim.scope.s.ch[i], c));
+      if (st.cpi !== undefined) sim.runtime.cpi = st.cpi;
       sim.runScript(ex.code, ex.name); sim._applyActions();
       const t0 = performance.now();
       for (let i = 0; i < 150 && sim.runtime.state === 'running'; i++) { sim._applyActions(); sim._chunk(sim.simTime + 0.004, performance.now() + 500); }
@@ -485,7 +487,239 @@ try {
     }
   }
 } catch (e) { fail++; out.push('EXCEPTION ' + e + '\n' + e.stack); }
-out.unshift('RESULT pass=' + pass + ' fail=' + fail);
-document.getElementById('out').textContent = out.join('\n');
+// ---------- 비동기 섹션 (네트워크: JS 이벤트 루프가 돌아야 응답이 도착함) ----------
+(async () => {
+  try { if (sec(12)) await netTests(); }
+  catch (e) { fail++; out.push('EXCEPTION ' + e + '\n' + e.stack); }
+  out.unshift('RESULT pass=' + pass + ' fail=' + fail);
+  document.getElementById('out').textContent = out.join('\n');
+})();
+
+// ---------- 12. 네트워크 (HTTP / WebSocket) — 모의 fetch / WebSocket ----------
+async function netTests() {
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const mock = { aborted: 0, fetches: [], sockets: [] };
+  const bytes256 = () => { const b = new Uint8Array(256); for (let i = 0; i < 256; i++) b[i] = i; return b; };
+  const frameText = (k) => [k * 100 + 1, 2000, k * 100 + 2, 2100, k * 100 + 3, 2200, k * 100 + 4, 2300].join(',') + '\n';
+  const INFO = 'frames=6\nfps=25\nmax_points=4\nsource=mock\n';
+  // 브라우저 fetch 와 같은 비동기 동작 (setTimeout 으로 응답, AbortSignal 지원)
+  function mockFetch(url, init) {
+    mock.fetches.push({ url: url, init: init });
+    const path = url.replace(/^\w+:\/\/[^/]+/, '');
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const res = (v) => { if (!settled) { settled = true; resolve(v); } };
+      const rej = (e) => { if (!settled) { settled = true; reject(e); } };
+      if (init && init.signal) init.signal.addEventListener('abort', () => { mock.aborted++; rej(new DOMException('The operation was aborted.', 'AbortError')); });
+      const reply = (ms, body, status, headers) => setTimeout(() => res(new Response(body, { status: status || 200, headers: headers || {} })), ms);
+      let m;
+      if (path === '/bytes') reply(20, bytes256(), 200, { 'X-Test': 'yes' });
+      else if (path === '/slow') reply(120, 'slow-body');
+      else if (path === '/hang') { /* 응답 없음 */ }
+      else if (path === '/fail') setTimeout(() => rej(new TypeError('Failed to fetch')), 5);
+      else if (path === '/nf') reply(5, 'not found', 404);
+      else if (path === '/echo') reply(10, init.body || '', 200, { 'X-Method': init.method, 'X-CT': (init.headers && init.headers['Content-Type']) || '' });
+      else if (path === '/api/info') reply(5, INFO);
+      else if ((m = /^\/api\/frame\/(\d+)$/.exec(path))) reply(8, frameText(+m[1]));
+      else reply(5, 'unknown', 404);
+    });
+  }
+  // 브라우저 WebSocket 과 같은 비동기 동작 + 간단한 서버 동작
+  class MockWS {
+    constructor(url) {
+      this.url = url; this.readyState = 0; this.binaryType = 'blob'; this.sent = [];
+      mock.sockets.push(this);
+      setTimeout(() => {
+        if (/refuse/.test(url)) { this.readyState = 3; if (this.onerror) this.onerror({}); if (this.onclose) this.onclose({ code: 1006, reason: '' }); return; }
+        this.readyState = 1; if (this.onopen) this.onopen({});
+      }, 10);
+    }
+    send(m) {
+      if (this.readyState !== 1) throw new Error('InvalidStateError: not open');
+      this.sent.push(m);
+      setTimeout(() => this._server(m), 4);
+    }
+    _server(m) {
+      if (this.readyState !== 1) return;
+      if (typeof m !== 'string') { this._emit(new Uint8Array(m).slice().buffer); return; }   // binary echo
+      if (m === 'bin') { this._emit(bytes256().buffer); return; }
+      if (m.startsWith('burst ')) { for (let i = 0, n = +m.slice(6); i < n; i++) this._emit('m' + i); return; }
+      if (m === 'bye') { this.readyState = 3; if (this.onclose) this.onclose({ code: 1000, reason: 'bye' }); return; }
+      if (m === 'info') { this._emit(INFO); return; }
+      if (m.startsWith('stream')) { let k = 0; this._tm = setInterval(() => { if (this.readyState === 1) this._emit(frameText(k++ % 6)); }, 40); return; }
+      this._emit('echo:' + m);
+    }
+    _emit(d) { if (this.onmessage) this.onmessage({ data: d }); }
+    close(code, reason) {
+      if (this.readyState >= 2) return;
+      this.readyState = 2; clearInterval(this._tm);
+      setTimeout(() => { this.readyState = 3; if (this.onclose) this.onclose({ code: code || 1000, reason: reason || '' }); }, 3);
+    }
+  }
+  const impl = { fetch: mockFetch, WebSocket: MockWS };
+  /** 스크립트 실행: 틱마다 시뮬레이션 dt 진행 + 이벤트 루프 양보(응답 도착) */
+  async function runLua(code, opts) {
+    opts = opts || {};
+    const sim = new VS.Simulator();
+    sim.runtime.net.impl = impl;
+    if (opts.cpi !== undefined) sim.runtime.cpi = opts.cpi;
+    if (opts.setup) opts.setup(sim);
+    const outs = [];
+    sim.on('console', (m) => { if (m.kind === 'out') outs.push(m.text); });
+    sim.runScript(code, 'net.lua'); sim._applyActions();
+    for (let i = 0; i < (opts.max || 1500) && sim.runtime.state === 'running'; i++) {
+      sim._applyActions();
+      sim._chunk(sim.simTime + (opts.dt || 0.004), performance.now() + 200);
+      if (opts.until && opts.until(sim, outs)) break;
+      await sleep(1);
+    }
+    return { sim: sim, outs: outs, rt: sim.runtime };
+  }
+  const levels = (tl) => tl.bps.map(b => [b.t, b.raw.v]);
+  const onEdge = (t) => Math.abs(t * 1e7 - Math.round(t * 1e7)) < 1e-3;
+
+  // (a) 대기형 http_get: 바이너리 무손실, 대기 중 시뮬레이션 진행, 출력 유지
+  {
+    const r = await runLua([
+      'gpio_write(GPIO1, HIGH)',
+      'local t0 = sim_time()',
+      'local body, st, h = http_get("http://mock/bytes")',
+      'local t1 = sim_time()',
+      'local ok = #body == 256',
+      'for i = 0, 255 do if body:byte(i + 1) ~= i then ok = false end end',
+      'print("bytes", #body, ok, st, h["x-test"])',
+      'printf("waited %.4f", t1 - t0)',
+      'gpio_write(GPIO1, LOW)'
+    ].join('\n'), { setup: (sim) => sim.setProbe(0, 1) });
+    ok(r.rt.state === 'done', 'net: http_get 스크립트 완료', r.rt.state + ' ' + JSON.stringify(r.rt.errorInfo));
+    ok(r.outs[0] === 'bytes\t256\ttrue\t200\tyes', 'net: http_get 바이너리 본문 0..255 무손실 + status/headers', r.outs[0]);
+    const waited = parseFloat((r.outs[1] || '').split(' ')[1]);
+    ok(waited >= 0.004, 'net: 응답 대기 중에도 시뮬레이션 시계 진행 (시계 정지 없음)', r.outs[1] + ' s (sim, 실제 응답 시간에 비례)');
+    // 프로브 연결 시점(t=0, 0 V) → HIGH(명령어 몇 개 뒤) → 응답 후 LOW. 그 사이 변화 없음
+    const lv = levels(r.sim.inputs[0].tl).filter((x, i, a) => i === 0 || x[1] !== a[i - 1][1]);
+    const tLow = lv.length ? lv[lv.length - 1][0] : NaN;
+    ok(lv.length === 3 && lv[1][1] === 3.3 && lv[1][0] < 1e-5 && lv[2][1] === 0 && tLow >= waited && onEdge(tLow), 'net: 대기 중 출력 유지 (HIGH → 응답 후 LOW, 클럭 엣지에서 재개)', JSON.stringify(lv.map(x => [+x[0].toFixed(7), x[1]])));
+  }
+  // (b) 비동기 http_request: 대기 중 출력은 스크립트가 결정
+  {
+    const r = await runLua([
+      'local req = http_request("http://mock/slow")',
+      'print("ready0", req:ready(), req:result())',
+      'local n = 0',
+      'while not req:ready() do gpio_toggle(GPIO2); delay(1); n = n + 1 end',
+      'local body, st = req:result()',
+      'print("loop", n >= 20, body, st)',
+      'print("cached", req:result())'
+    ].join('\n'), { setup: (sim) => sim.setProbe(0, 2) });
+    ok(r.outs[0] === 'ready0\tfalse\tnil\tpending', 'net: http_request 즉시 반환 (ready=false, result=pending)', r.outs[0]);
+    ok(r.outs[1] === 'loop\ttrue\tslow-body\t200', 'net: 응답 대기 동안 스크립트가 출력 제어 (GPIO2 토글)', r.outs[1]);
+    ok(/^cached\tslow-body\t200\ttable: /.test(r.outs[2] || ''), 'net: result() 재호출 시 같은 결과', r.outs[2]);
+    ok(r.sim.inputs[0].tl.length >= 20, 'net: 대기 중 토글 이벤트가 파형에 기록', r.sim.inputs[0].tl.length + ' edges');
+  }
+  // (c) 타임아웃(시뮬레이션 시간) / 네트워크 오류 / 상태 코드 / POST 바이너리
+  {
+    const ab0 = mock.aborted;
+    const r = await runLua([
+      'local t0 = sim_time()',
+      'local b, e = http_get("http://mock/hang", { timeout = 0.05 })',
+      'printf("timeout %s %s %.6f", tostring(b), tostring(e), sim_time() - t0)',
+      'local b2, e2 = http_get("http://mock/fail")',
+      'print("fail", b2, (e2 or ""):find("network error", 1, true) ~= nil)',
+      'local b3, s3 = http_get("http://mock/nf")',
+      'print("404", b3, s3)',
+      'local b4, s4, h4 = http_post("http://mock/echo", "a\\0\\255b", { content_type = "application/x-test" })',
+      'print("post", b4 == "a\\0\\255b", #b4, h4["x-method"], h4["x-ct"])'
+    ].join('\n'), { cpi: 0 });
+    ok(r.outs[0] === 'timeout nil timeout 0.050000', 'net: http_get timeout = 시뮬레이션 시간 (정확히 50 ms 후 재개)', r.outs[0]);
+    ok(mock.aborted > ab0, 'net: 시간 초과된 요청은 취소(abort)', 'aborted +' + (mock.aborted - ab0));
+    ok(r.outs[1] === 'fail\tnil\ttrue', 'net: 네트워크 오류 → nil, "network error ..."', r.outs[1]);
+    ok(r.outs[2] === '404\tnot found\t404', 'net: HTTP 상태 코드 전달 (404)', r.outs[2]);
+    ok(r.outs[3] === 'post\ttrue\t4\tPOST\tapplication/x-test', 'net: http_post 바이너리 본문 + Content-Type', r.outs[3]);
+  }
+  // (d) WebSocket
+  {
+    const r = await runLua([
+      'local ws, err = ws_open("ws://mock/ws")',
+      'print("open", ws ~= nil, ws and ws:state(), err)',
+      'ws:send("hello")',
+      'print("recv", ws:recv(1))',
+      'ws:send("bin")',
+      'local b = ws:recv(1)',
+      'local okb = #b == 256',
+      'for i = 0, 255 do if b:byte(i + 1) ~= i then okb = false end end',
+      'print("bin", #b, okb)',
+      'ws:send(string.char(0, 200, 255), "binary")',
+      'local e = ws:recv(1)',
+      'print("binecho", #e, e:byte(1), e:byte(2), e:byte(3))',
+      'ws:send("burst 5")',
+      'local m1 = ws:recv(1)',
+      'print("burst", m1, ws:available())',
+      'local cnt = 0',
+      'while ws:poll() do cnt = cnt + 1 end',
+      'print("polled", cnt, ws:available())',
+      'local t0 = sim_time()',
+      'local m, why = ws:recv(0.02)',
+      'printf("rto %s %s %.6f", tostring(m), tostring(why), sim_time() - t0)',
+      'ws:send("bye")',
+      'local m2, why2 = ws:recv(1)',
+      'print("closed", m2, why2, ws:state())',
+      'print("send_after_close", ws:send("x"))',
+      'local s2, e2 = ws_open("ws://mock/refuse")',
+      'print("refuse", s2, e2)',
+      'local s3 = ws_open("ws://mock/ws", { wait = false })',
+      'print("nowait", s3:state())',
+      's3:send("queued")',
+      'print("queued", s3:recv(1))'
+    ].join('\n'), { cpi: 0 });
+    const o = r.outs;
+    ok(r.rt.state === 'done', 'ws: 스크립트 완료', r.rt.state + ' ' + JSON.stringify(r.rt.errorInfo));
+    ok(o[0] === 'open\ttrue\topen\tnil', 'ws: ws_open 연결 대기', o[0]);
+    ok(o[1] === 'recv\techo:hello', 'ws: send/recv (text)', o[1]);
+    ok(o[2] === 'bin\t256\ttrue', 'ws: binary 메시지 0..255 무손실', o[2]);
+    ok(o[3] === 'binecho\t3\t0\t200\t255', 'ws: binary 전송 (mode "binary")', o[3]);
+    ok(o[4] === 'burst\tm0\t4' && o[5] === 'polled\t4\t0', 'ws: 수신 대기열 / available / poll', o[4] + ' | ' + o[5]);
+    ok(o[6] === 'rto nil timeout 0.020000', 'ws: recv timeout = 시뮬레이션 시간', o[6]);
+    ok(o[7] === 'closed\tnil\tclosed\tclosed', 'ws: 서버 종료 → recv nil, "closed"', o[7]);
+    ok(/^send_after_close\tnil\tWebSocket is closed/.test(o[8]), 'ws: 닫힌 소켓 send → nil, 오류', o[8]);
+    ok(/^refuse\tnil\tconnection failed/.test(o[9]), 'ws: 연결 실패 → nil, 오류', o[9]);
+    ok(o[10] === 'nowait\tconnecting' && o[11] === 'queued\techo:queued', 'ws: wait=false + 연결 전 send 는 연결 후 전송', o[10] + ' | ' + o[11]);
+  }
+  // (e) coroutine 안에서 대기 불가 (명확한 오류), 비동기 확인은 가능
+  {
+    const r = await runLua([
+      'local co = coroutine.wrap(function() return http_get("http://mock/bytes") end)',
+      'local ok, err = pcall(co)',
+      'print("co", ok, tostring(err):find("메인 스크립트", 1, true) ~= nil)',
+      'local req = http_request("http://mock/bytes")',
+      'print("co_ready", coroutine.wrap(function() return req:ready() end)())'
+    ].join('\n'));
+    ok(r.outs[0] === 'co\tfalse\ttrue' && r.outs[1] === 'co_ready\tfalse', 'net: coroutine 내부 대기 → 오류, ready() 확인은 허용', r.outs.join(' | '));
+  }
+  // (f) 스크립트 정지 → 요청 취소, 소켓 닫힘
+  {
+    const ab0 = mock.aborted, ns0 = mock.sockets.length;
+    const r = await runLua('local ws = ws_open("ws://mock/ws")\nlocal r = http_request("http://mock/hang")\nprint("started")\nwhile true do delay(1) end',
+      { until: (sim, outs) => outs.length > 0 });
+    r.sim.stopScript(); r.sim._applyActions();
+    const sock = mock.sockets[ns0];
+    ok(r.outs[0] === 'started' && mock.aborted === ab0 + 1 && sock && sock.readyState >= 2 && r.rt.net.reqs.size === 0 && r.rt.net.socks.size === 0,
+      'net: 스크립트 정지 시 요청 취소 + 소켓 닫기', 'aborted +' + (mock.aborted - ab0) + ', ws readyState ' + (sock && sock.readyState));
+  }
+  // (g) 예제 11 (HTTP 프레임 재생), 12 (WebSocket 스트림) — 모의 서버
+  for (const name of ['11_net_http_frames.lua', '12_net_ws_stream.lua']) {
+    const ex = VS.EXAMPLES.find(e => e.name === name), st = ex.setup;
+    // DAC1 에 나타난 코드 = 표시된 프레임의 X 좌표 (k*100 + 1..4) — 타임라인은 최근 구간만 보존되므로 틱마다 누적
+    const codes = new Set();
+    const r = await runLua(ex.code, {
+      cpi: st.cpi, max: 200,
+      setup: (sim) => { sim.setProbe(0, st.probes[0]); sim.setProbe(1, st.probes[1]); sim.scope.setMode(st.mode); Object.assign(sim.scope.s.xy, st.xy); st.ch.forEach((c, i) => Object.assign(sim.scope.s.ch[i], c)); },
+      until: (sim) => { for (const b of sim.inputs[0].tl.bps) codes.add(Math.round(b.raw.v / 3.3 * 4095)); return false; }
+    });
+    const frames = new Set(Array.from(codes).filter(c => c > 0 && c < 1000).map(c => Math.floor(c / 100)));
+    const rec = r.sim.scope.xyRecord();
+    ok(r.rt.state === 'running' && frames.size >= (name.startsWith('11') ? 6 : 3) && rec && rec.n > 1000,
+      'example ' + name + ' (모의 서버)', 'frames ' + Array.from(frames).sort().join(',') + ', xy pts ' + (rec ? rec.n : 0) + ', sim ' + r.sim.simTime.toFixed(2) + ' s | ' + r.outs.slice(0, 2).join(' | '));
+  }
+}
 })();
 </script></body></html>

@@ -42,6 +42,21 @@
       ['fs.list() · fs.exists(n) · fs.read(n) · fs.write(n,s) · fs.append(n,s) · fs.remove(n)', '파일 유틸리티'],
       ['dofile(n) · loadfile(n) · require("mod")', '다른 스크립트 파일 로드 (mod.lua)'],
       ['os.remove · os.rename · os.clock()', 'os.clock = 스크립트 시작 후 경과 시뮬레이션 시간']]],
+    ['네트워크: HTTP (시뮬레이션 시계는 대기 중에도 계속 흐름)', [
+      ['req = http_request(url [, opts])', '요청만 걸고 즉시 반환 (비동기). opts: method, body, headers{}, content_type, net_timeout(실제 초, 기본 15)'],
+      ['req:ready() · req:result()', '도착 여부 / body, status, headers (실패: nil, 오류, 미완료: nil, "pending"). 대기 중 출력은 스크립트가 결정'],
+      ['req:wait([timeout]) · req:cancel()', '도착할 때까지 잠들어 대기 (delay 와 같음, 출력 유지). timeout = 시뮬레이션 시간(초) → nil, "timeout"'],
+      ['body, status, headers = http_get(url [, opts])', '요청 + 대기. opts.timeout = 시뮬레이션 시간(초)'],
+      ['http_post(url, body [, opts])', 'POST 요청 + 대기. 기본 Content-Type: text/plain'],
+      ['body 는 바이트 그대로', '텍스트/바이너리 모두 손실 없음 (string.unpack 으로 바이너리 해석 가능)']]],
+    ['네트워크: WebSocket', [
+      ['ws, err = ws_open(url [, {timeout, protocols, wait}])', '연결될 때까지 대기 후 반환 (wait=false: 즉시 반환, 연결 전 send 는 연결 후 전송)'],
+      ['ws:send(data [, "text"|"binary"])', '전송 (기본: UTF-8 이면 text 프레임, 아니면 binary 프레임)'],
+      ['ws:poll() · ws:available()', '대기 없이 메시지 1개 꺼내기 (없으면 nil) / 쌓인 메시지 수'],
+      ['msg, err = ws:recv([timeout])', '메시지가 올 때까지 잠들어 대기. err: "timeout" | "closed"'],
+      ['ws:state() · ws:error() · ws:dropped() · ws:close()', '"connecting|open|closing|closed" / 오류 / 대기열 초과로 버린 수 / 닫기'],
+      ['ws_send(ws, …) · ws_recv · ws_poll · ws_available · ws_state · ws_close', '함수형 별칭'],
+      ['서버 예제: tools/signal_server.py', 'HTTP /api/info, /api/frame/<k> · WebSocket /ws, /relay (UDP/TCP 중계). 스크립트 정지 시 요청 취소·소켓 닫힘']]],
     ['언어 (Lua 5.3, fengari)', [
       ['local x = 10; x = x + 1', '변수 선언 / 대입. 정수는 32bit (MCU 레지스터와 동일 폭)'],
       ['+ - * / // % ^   & | ~ << >> ~x', '산술 / 비트 연산'],
@@ -146,6 +161,7 @@
       const rt = this.sim.runtime, paused = this.sim.paused;
       let st = rt.state, cls = st;
       if (paused) { st = 'PAUSED' + (rt.state === 'running' ? ' (running)' : ''); cls = 'paused'; }
+      else if (this._waitLbl) st = 'RUNNING · ' + this._waitLbl;
       this.statePill.textContent = st.toUpperCase();
       this.statePill.className = 'statepill ' + cls;
       this.bPause.textContent = paused ? '▶ 재개' : '⏸ 일시정지';
@@ -156,6 +172,10 @@
     }
     tick() {
       this.timeLbl.textContent = 't = ' + U.fmtSimTime(this.sim.simTime);
+      // 네트워크 대기가 길어지면 상태 표시 (시뮬레이션 시계는 계속 흐르고 스크립트만 잠든 상태)
+      const w = this.sim.runtime.waitInfo();
+      const lbl = (w && w.ms > 400) ? ({ http: 'HTTP 응답 대기', ws_open: 'WS 연결 대기', ws_msg: 'WS 수신 대기' }[w.what] || '대기') + ' ' + (w.ms / 1000).toFixed(1) + 's' : null;
+      if (lbl !== this._waitLbl) { this._waitLbl = lbl; this.updateState(); }
       this._flushConsole();
     }
 
