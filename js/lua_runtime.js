@@ -43,6 +43,11 @@
       this.warned = new Set();
       this.errorInfo = null;
       this.scriptName = 'script';
+      // 네트워크 (HTTP / WebSocket): 대기 중에도 시뮬레이션 시계는 계속 흐른다
+      this.net = new VS.NetHub(this.host.netImpl, (text) => { if (this.host.print) this.host.print('warning: ' + text, 'warn', this.lastNow); });
+      this.waitCond = null;     // 외부 이벤트 대기 { check(), deadline(sim s), what, since(real ms) }
+      this.wakeResult = null;   // 대기 종료 결과 (true = 조건 충족, false = 시간 초과) → 재개 시 반환값
+      this.tReached = 0;        // 직전 run() 이 도달한 시각 (= 이미 확정되어 전달된 출력의 끝)
     }
     get instrTime() { return this.cpi / this.board.clk; }
     get running() { return this.state === 'running'; }
@@ -108,6 +113,7 @@
       this.icTotal = 0; this.icBase = 0; this.icAtAdvance = 0;
       const t0 = this.board.quantizeUp(tStart);
       this.tBase = t0; this.lastNow = t0; this.resumeAt = t0; this.startTime = t0;
+      this.tReached = t0; this.waitCond = null; this.wakeResult = null;
       lua.lua_sethook(co, (Lx) => this._hook(Lx), lua.LUA_MASKCOUNT, HOOK_N);
       this._setState('running');
       return true;
@@ -115,7 +121,7 @@
     stop(reason) {
       if (this.L && this.co) { try { this._flushFiles(); } catch (e) { /* ignore */ } }
       const wasRunning = this.state === 'running';
-      this.L = null; this.co = null;
+      this._release();
       if (wasRunning && reason) this._setState(reason);
       else if (wasRunning) this._setState('stopped');
     }
@@ -123,8 +129,26 @@
     _fail(msg, line) {
       this.errorInfo = { message: msg, line: line };
       if (this.host.print) this.host.print(msg, 'err', this.lastNow);
-      this.L = null; this.co = null;
+      this._release();
       this._setState('error');
+    }
+    /** Lua 상태와 스크립트가 연 네트워크 자원(요청/소켓) 해제 */
+    _release() {
+      this.L = null; this.co = null;
+      this.waitCond = null; this.wakeResult = null;
+      try { this.net.reset(); } catch (e) { /* ignore */ }
+    }
+    /** 외부 이벤트 대기 정보 (UI 표시용): { what, ms } | null */
+    waitInfo() {
+      const w = this.waitCond;
+      return (w && this.state === 'running') ? { what: w.what, ms: performance.now() - w.since } : null;
+    }
+    /** t 보다 엄격히 뒤의 첫 보드 클럭 엣지 */
+    _edgeAfter(t) {
+      const b = this.board;
+      let w = b.quantizeUp(t);
+      if (w <= t) w = b.quantizeUp(t + 0.5 / b.clk);
+      return w;
     }
     _lineOf(msg) {
       const re = new RegExp(this.scriptName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ':(\\d+):');
@@ -153,16 +177,38 @@
      * (실시간 예산(deadline) 초과 시 T_target 보다 작을 수 있음)
      */
     run(T_target, deadline) {
+      const t = this._run(T_target, deadline);
+      if (t > this.tReached) this.tReached = t;
+      return t;
+    }
+    _run(T_target, deadline) {
       if (this.state !== 'running' || !this.co) return T_target;
       this.T_target = T_target; this.deadline = deadline;
       const co = this.co;
       for (let guard = 0; guard < 1000000; guard++) {
+        if (this.waitCond) {
+          // 외부 이벤트(네트워크 응답/메시지) 대기 중: 스크립트는 잠들어 있고 출력은 마지막 값을 유지한다.
+          // 결과는 JS 이벤트 처리 후(다음 틱)에야 보이므로, 충족되면 이미 확정된 구간(tReached) 직후 클럭 엣지에서 깨운다.
+          const w = this.waitCond;
+          let ok = null;
+          try { if (w.check()) ok = true; } catch (e) { ok = true; }
+          if (ok === null && w.deadline <= T_target) ok = false;
+          if (ok === null) return T_target;
+          this.waitCond = null; this.wakeResult = ok;
+          this.resumeAt = ok ? this._edgeAfter(Math.max(this.resumeAt, this.tReached)) : Math.max(this.resumeAt, this.board.quantizeUp(w.deadline));
+        }
         if (this.resumeAt > T_target) return T_target;
         if (guard > 0 && performance.now() > deadline) return this.resumeAt;
+        let nargs = 0;
+        if (this.wakeResult !== null) {
+          this._anchor(co, this.resumeAt);
+          lua.lua_pushboolean(co, this.wakeResult);
+          this.wakeResult = null; nargs = 1;
+        }
         this.yieldKind = null;
         let st;
         try {
-          st = lua.lua_resume(co, this.L, 0);
+          st = lua.lua_resume(co, this.L, nargs);
         } catch (e) {
           this._fail('internal error: ' + (e && e.message ? e.message : e), null);
           return T_target;
@@ -175,14 +221,14 @@
         }
         if (st === lua.LUA_OK) {
           this._flushFiles();
-          this.L = null; this.co = null;
+          this._release();
           this._setState('done');
           return T_target;
         }
         // 오류
         const msg = tojs(co, -1);
         if (msg.indexOf(EXIT_TOKEN) >= 0) {
-          this._flushFiles(); this.L = null; this.co = null; this._setState('done');
+          this._flushFiles(); this._release(); this._setState('done');
           return T_target;
         }
         let tb = msg;
@@ -383,6 +429,103 @@
         lua.lua_createtable(Lx, names.length, 0);
         names.forEach((nm, i) => { pushstr(Lx, nm); lua.lua_rawseti(Lx, -2, i + 1); });
         return 1;
+      });
+
+      // ---- 네트워크 (HTTP / WebSocket) ----
+      //  데이터는 바이트 그대로 전달 (Lua string ↔ Uint8Array). 대기형 호출도 시뮬레이션 시계를 멈추지 않는다.
+      const net = this.net;
+      const isStr = (Lx, i) => { const t = lua.lua_type(Lx, i); return t === lua.LUA_TSTRING || t === lua.LUA_TNUMBER; };
+      const bytesArg = (Lx, i) => Uint8Array.from(lua.lua_tolstring(Lx, i));
+      const urlArg = (Lx, i) => {
+        const u = isStr(Lx, i) ? tojs(Lx, i).trim() : '';
+        if (!u) return lauxlib.luaL_argerror(Lx, i, to_luastring('URL expected'));
+        return u;
+      };
+      const idArg = (Lx, i) => lauxlib.luaL_checkinteger(Lx, i);
+      const optSec = (Lx, i) => lua.lua_type(Lx, i) === lua.LUA_TNUMBER ? lua.lua_tonumber(Lx, i) : null;
+      /** { 문자열 키: 문자열 값 } 테이블 → JS 객체 */
+      const strMap = (Lx, i) => {
+        const o = {};
+        if (lua.lua_type(Lx, i) !== lua.LUA_TTABLE) return o;
+        i = lua.lua_absindex(Lx, i);
+        lua.lua_pushnil(Lx);
+        while (lua.lua_next(Lx, i) !== 0) {
+          if (lua.lua_type(Lx, -2) === lua.LUA_TSTRING && isStr(Lx, -1)) o[tojs(Lx, -2)] = tojs(Lx, -1);
+          lua.lua_pop(Lx, 1);
+        }
+        return o;
+      };
+      /** 배열 테이블 또는 문자열 → 문자열 배열 */
+      const strList = (Lx, i) => {
+        if (isStr(Lx, i)) return [tojs(Lx, i)];
+        if (lua.lua_type(Lx, i) !== lua.LUA_TTABLE) return null;
+        i = lua.lua_absindex(Lx, i);
+        const out = [], n = lua.lua_rawlen(Lx, i);
+        for (let k = 1; k <= n; k++) { lua.lua_rawgeti(Lx, i, k); if (isStr(Lx, -1)) out.push(tojs(Lx, -1)); lua.lua_pop(Lx, 1); }
+        return out;
+      };
+
+      /** __net_wait(kind, id [, timeout(sim s)]) → true(조건 충족) | false(시간 초과).
+       *  delay() 처럼 스크립트를 재우고 시뮬레이션은 계속 진행한다. */
+      reg('__net_wait', (Lx) => {
+        const kind = tojs(Lx, 1), id = idArg(Lx, 2), tmo = optSec(Lx, 3);
+        let check;
+        if (kind === 'http') check = () => net.httpReady(id);
+        else if (kind === 'ws_open') check = () => net.wsState(id) !== 'connecting';
+        else if (kind === 'ws_msg') check = () => net.wsAvailable(id) > 0 || net.wsState(id) === 'closed';
+        else return luaErr(Lx, 'invalid wait kind: ' + kind);
+        if (check()) { lua.lua_pushboolean(Lx, true); return 1; }
+        if (tmo !== null && tmo <= 0) { lua.lua_pushboolean(Lx, false); return 1; }
+        if (Lx !== self.co || !lua.lua_isyieldable(Lx))
+          return luaErr(Lx, '네트워크 대기(http_get / req:wait / ws:recv / ws_open)는 메인 스크립트에서만 가능합니다. coroutine·콜백 안에서는 req:ready() / ws:poll() 로 확인하세요');
+        const now = self.now(Lx);
+        self.waitCond = { check: check, deadline: tmo === null ? Infinity : now + tmo, what: kind, since: performance.now() };
+        self.resumeAt = now; self.yieldKind = 'wait';
+        return lua.lua_yield(Lx, 0);
+      });
+
+      // HTTP
+      reg('__http_start', (Lx) => {
+        const url = urlArg(Lx, 1);
+        const method = isStr(Lx, 2) ? tojs(Lx, 2) : 'GET';
+        const body = isStr(Lx, 3) ? bytesArg(Lx, 3) : null;
+        const id = net.httpStart(url, { method: method, body: body, headers: strMap(Lx, 4), netTimeout: optSec(Lx, 5) });
+        lua.lua_pushinteger(Lx, id); return 1;
+      });
+      reg('__http_ready', (Lx) => { lua.lua_pushboolean(Lx, net.httpReady(idArg(Lx, 1))); return 1; });
+      reg('__http_take', (Lx) => {
+        const r = net.httpTake(idArg(Lx, 1));
+        if (!r) { lua.lua_pushnil(Lx); pushstr(Lx, 'pending'); return 2; }
+        if (!r.ok) { lua.lua_pushnil(Lx); pushstr(Lx, r.err || 'request failed'); return 2; }
+        lua.lua_pushstring(Lx, r.body);
+        lua.lua_pushinteger(Lx, r.status);
+        const keys = Object.keys(r.headers || {});
+        lua.lua_createtable(Lx, 0, keys.length);
+        for (const k of keys) { pushstr(Lx, r.headers[k]); lua.lua_setfield(Lx, -2, to_luastring(k)); }
+        return 3;
+      });
+      reg('__http_cancel', (Lx) => { net.httpCancel(idArg(Lx, 1)); return 0; });
+
+      // WebSocket
+      reg('__ws_open', (Lx) => { lua.lua_pushinteger(Lx, net.wsOpen(urlArg(Lx, 1), strList(Lx, 2))); return 1; });
+      reg('__ws_state', (Lx) => { pushstr(Lx, net.wsState(idArg(Lx, 1))); return 1; });
+      reg('__ws_error', (Lx) => { const e = net.wsError(idArg(Lx, 1)); if (e) pushstr(Lx, e); else lua.lua_pushnil(Lx); return 1; });
+      reg('__ws_available', (Lx) => { lua.lua_pushinteger(Lx, net.wsAvailable(idArg(Lx, 1))); return 1; });
+      reg('__ws_dropped', (Lx) => { lua.lua_pushinteger(Lx, net.wsDropped(idArg(Lx, 1))); return 1; });
+      reg('__ws_poll', (Lx) => { const m = net.wsPoll(idArg(Lx, 1)); if (m) lua.lua_pushstring(Lx, m); else lua.lua_pushnil(Lx); return 1; });
+      reg('__ws_send', (Lx) => {
+        const id = idArg(Lx, 1);
+        if (!isStr(Lx, 2)) return lauxlib.luaL_argerror(Lx, 2, to_luastring('string expected'));
+        const mode = isStr(Lx, 3) ? tojs(Lx, 3) : 'auto';
+        if (mode !== 'auto' && mode !== 'text' && mode !== 'binary') return lauxlib.luaL_argerror(Lx, 3, to_luastring('"text", "binary" or nil expected'));
+        try { net.wsSend(id, bytesArg(Lx, 2), mode); }
+        catch (e) { lua.lua_pushnil(Lx); pushstr(Lx, e.message || String(e)); return 2; }
+        lua.lua_pushboolean(Lx, true); return 1;
+      });
+      reg('__ws_close', (Lx) => {
+        const code = lua.lua_type(Lx, 2) === lua.LUA_TNUMBER ? lua.lua_tointeger(Lx, 2) : 1000;
+        net.wsClose(idArg(Lx, 1), code, isStr(Lx, 3) ? tojs(Lx, 3) : '');
+        return 0;
       });
     }
   }
