@@ -246,6 +246,7 @@ local ws = ws_open(url)  ws:send(s)  ws:recv(0.1)  ws:poll()  ws:available()  ws
 
 예제 11, 12 는 CPI = 0 으로 설정됩니다. CPI ≥ 1 이면 파싱 시간 동안 빔이 한 점에 멈추고, X/Y 두 DAC 쓰기 사이의
 명령어 시간 동안 (새 X, 이전 Y) 위치에 점이 찍히기 때문입니다. 서버가 없으면 1 초마다 재연결을 시도합니다.
+GitHub Pages 같은 공개 웹 주소로 열면 예제 11, 12 는 목록에서 비활성화됩니다. `index.html` 을 직접 열거나 `localhost` 로 열면 그대로 사용할 수 있습니다.
 
 ## 파일 구조
 

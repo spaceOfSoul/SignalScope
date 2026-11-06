@@ -5,6 +5,8 @@
 
   const CLK_LIST = [1e6, 2e6, 4e6, 8e6, 10e6, 16e6, 20e6, 48e6, 50e6, 100e6];
   const CPI_LIST = [0, 1, 2, 4, 8, 10, 16, 32, 64];
+  // 공개 웹 주소(GitHub Pages 등)에서는 브라우저 권한 없이 로컬 데이터 서버에 접속할 수 없어 네트워크 예제를 끈다. file:// 과 로컬 주소에서는 그대로 쓴다.
+  const PUBLIC_WEB = location.protocol !== 'file:' && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
 
   class ScriptWindow {
     constructor(sim, app) {
@@ -24,7 +26,10 @@
       this.nameIn.addEventListener('change', () => { this.name = this.nameIn.value.trim() || 'script.lua'; this.nameIn.value = this.name; this.app.saveSoon(); });
       const exSel = UI.el('select', { title: '예제 불러오기 (권장 프로브/스코프 설정도 함께 적용)', style: 'max-width:150px' });
       exSel.appendChild(UI.el('option', { value: '', text: '예제 불러오기…' }));
-      VS.EXAMPLES.forEach((ex, i) => exSel.appendChild(UI.el('option', { value: String(i), text: ex.title })));
+      VS.EXAMPLES.forEach((ex, i) => {
+        const off = ex.net && PUBLIC_WEB;
+        exSel.appendChild(UI.el('option', { value: String(i), text: ex.title + (off ? ' (웹 버전 미지원)' : ''), disabled: off }));
+      });
       exSel.addEventListener('change', () => { if (exSel.value !== '') this.loadExample(+exSel.value); exSel.value = ''; });
       const tb1 = UI.el('div', { class: 'toolbar' }, [
         UI.el('button', { text: '📂 열기', title: 'PC 에서 .lua 파일 불러오기', onclick: () => this.openFromPC() }),
