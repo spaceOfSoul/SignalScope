@@ -34,6 +34,7 @@ navigation:
     tests/: 브라우저 코어 테스트, Git Bash 실행 스크립트, 데이터 서버 테스트, 실제 네트워크 종단 간 테스트
     tools/: 브라우저 앱과 별도로 실행하는 Python 데이터 서버 (HTTP/WebSocket/UDP·TCP 중계)
     요구사항목록/: 기본 기능 및 XY 모드 요구사항
+    추가구현사항목록/: 요구사항 문서 외에 추가한 기능의 구현 기록
 
 architecture:
   # index.html의 실제 script src 순서. 새 파일을 추가하면 이 순서도 함께 검토한다.
@@ -199,6 +200,7 @@ files:
     exports: [VS.ui.CodeEditor, VS.ui.highlightLua]
     symbols: [CodeEditor, highlight, API, CONST, KW]
     depends_on: [js/ui_controls.js]
+    note: API는 강조할 전역 함수 이름 목록이다. js/lua_prelude.js에 전역 함수를 추가하면 함께 갱신한다.
   js/examples.js:
     role: 브라우저 예제 메뉴와 코어 테스트에서 사용하는 내장 Lua 코드 및 권장 프로브/스코프 setup
     kind: examples_catalog
@@ -349,6 +351,15 @@ files:
   요구사항목록/요구사항_2.md:
     role: XY 모드, 동일 시각 샘플 쌍, 축/잔상/Zoom/CSV 및 비활성 채널 처리 요구사항
     kind: requirements
+  추가구현사항목록/README.md:
+    role: 추가 구현 기록의 목록(ADD-ID, 반영 상태)과 기록 방식
+    kind: docs
+    related: [추가구현사항목록/001_네트워크_입력.md]
+  추가구현사항목록/001_네트워크_입력.md:
+    role: ADD-001 네트워크 입력의 범위, Lua API, 시간 규칙, 서버 프로토콜, 제약, 검증 결과
+    kind: docs
+    related: [js/net.js, js/lua_runtime.js, js/lua_prelude.js, tools/signal_server.py]
+    note: 네트워크 동작이 바뀌면 이 문서의 내용과 변경 기록, 목록의 반영 상태를 함께 갱신한다.
 
 persistence:
   backend: 브라우저 localStorage. 시뮬레이션 시간/획득 레코드 자체는 저장 대상으로 구성되어 있지 않다.
