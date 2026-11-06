@@ -212,7 +212,7 @@ files:
     kind: examples_catalog
     exports: [VS.EXAMPLES]
     related: [examples/, js/ui_script.js, js/main.js, tests/test.html, tests/net_e2e.html]
-    note: examples/*.lua를 fetch하지 않는다. 예제 수정 시 독립 Lua 파일과 이 파일의 code/setup을 함께 검토한다. setup.cpi를 지정할 수 있으며(예제 11, 12는 0), 지정하지 않은 예제를 불러오면 CPI가 1로 돌아간다.
+    note: examples/*.lua를 fetch하지 않는다. 예제 수정 시 독립 Lua 파일과 이 파일의 code/setup을 함께 검토한다. setup.cpi를 지정할 수 있으며(예제 11, 12는 0), 지정하지 않은 예제를 불러오면 CPI가 1로 돌아간다. net 플래그가 있는 예제(11, 12)는 공개 웹 주소에서 드롭다운 항목이 비활성화된다.
   js/ui_pins.js:
     role: 창 1. 보드 SVG/핀 표, 최대 2개 Probe 연결/교환, LPF/HPF R·C 입력, Enable, 출력 상태
     kind: ui
@@ -231,9 +231,9 @@ files:
     role: 창 2. 편집/실행, CLK/CPI, Pause/속도, 콘솔, PC/VFS 파일 관리, 예제 선택, API 도움말(네트워크 포함), 네트워크 대기 상태 표시
     kind: ui
     exports: [VS.ui.ScriptWindow]
-    symbols: [ScriptWindow, CLK_LIST, CPI_LIST]
+    symbols: [ScriptWindow, CLK_LIST, CPI_LIST, PUBLIC_WEB]
     methods: [ScriptWindow.run, ScriptWindow.loadExample, ScriptWindow.renderFiles, ScriptWindow.openFromPC, ScriptWindow.saveToPC, ScriptWindow.updateState, ScriptWindow.tick]
-    note: tick이 LuaRuntime.waitInfo를 읽어 대기가 0.4 s를 넘으면 상태 표시에 'RUNNING · HTTP 응답 대기' 등을 붙인다.
+    note: tick이 LuaRuntime.waitInfo를 읽어 대기가 0.4 s를 넘으면 상태 표시에 'RUNNING · HTTP 응답 대기' 등을 붙인다. PUBLIC_WEB(file:// 과 localhost, 127.0.0.1, [::1] 이 아닌 주소)이면 ex.net 예제의 드롭다운 항목을 비활성화한다.
     depends_on: [js/ui_controls.js, js/ui_editor.js, js/examples.js, js/api_doc.js, js/sim.js, js/util.js]
   js/scope_view.js:
     role: Y-T Canvas 화면, 10×8 눈금, min/max 축약 파형, 마커, 측정, Zoom/드래그 및 XY 입력 분기

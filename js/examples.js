@@ -320,7 +320,7 @@ end
 `
     },
     {
-      name: '11_net_http_frames.lua', title: '11 네트워크(HTTP): 서버 프레임 → XY 산점도 재생',
+      name: '11_net_http_frames.lua', title: '11 네트워크(HTTP): 서버 프레임 → XY 산점도 재생', net: true,
       setup: {
         probes: [5, 6], mode: 'xy', cpi: 0,
         ch: [{ vdiv: 0.5, pos: -3.3 }, { vdiv: 0.5, pos: -3.3 }], xy: { sr: 500e3, rl: 20000, draw: 'dot' }
@@ -409,7 +409,7 @@ end
 `
     },
     {
-      name: '12_net_ws_stream.lua', title: '12 네트워크(WebSocket): 실시간 프레임 스트림 수신',
+      name: '12_net_ws_stream.lua', title: '12 네트워크(WebSocket): 실시간 프레임 스트림 수신', net: true,
       setup: {
         probes: [5, 6], mode: 'xy', cpi: 0,
         ch: [{ vdiv: 0.5, pos: -3.3 }, { vdiv: 0.5, pos: -3.3 }], xy: { sr: 500e3, rl: 20000, draw: 'dot' }
