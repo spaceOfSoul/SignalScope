@@ -7,6 +7,7 @@
   const API = new Set(('gpio_write gpio_read gpio_toggle digitalWrite digitalRead pwm pwm_start pwm_set_freq pwm_set_duty pwm_stop pwm_read ' +
     'dac_write dac_write_voltage dac_write_v dac_read analogWrite pin_read pin_voltage pin_enabled delay delay_ms delay_us delay_ns sleep ' +
     'delay_clk wait_clk wait_until wait_until_clk every millis micros nanos sim_time clk ticks clk_freq cpi print printf ' +
+    'http_request http_get http_post ws_open ws_send ws_recv ws_poll ws_available ws_state ws_close ' +
     'io fs os string table math coroutine require dofile loadfile pcall error assert tostring tonumber ipairs pairs select type load').split(' '));
   const CONST = new Set('GPIO1 GPIO2 PWM1 PWM2 DAC1 DAC2 HIGH LOW VCC VREF DAC_MAX'.split(' '));
   const esc = (s) => s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
