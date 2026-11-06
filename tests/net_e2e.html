@@ -1,0 +1,119 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>SignalScope network e2e</title></head>
+<body><pre id="out">running...</pre>
+<script src="../lib/fengari-web.js"></script>
+<script src="../js/util.js"></script>
+<script src="../js/signal.js"></script>
+<script src="../js/board.js"></script>
+<script src="../js/vfs.js"></script>
+<script src="../js/net.js"></script>
+<script src="../js/lua_prelude.js"></script>
+<script src="../js/lua_runtime.js"></script>
+<script src="../js/scope.js"></script>
+<script src="../js/sim.js"></script>
+<script src="../js/examples.js"></script>
+<script>
+/* 실제 서버(tools/signal_server.py --demo)와 브라우저 Lua 사이의 HTTP / WebSocket 종단 간 테스트.
+ *   python tests/run_net_e2e.py   (서버 실행 → file:// 페이지로 실행)
+ *   직접: 서버 실행 후 file:///.../net_e2e.html?base=http://127.0.0.1:<port>  (base 생략 시 포트 8000)
+ */
+(async function () {
+  const out = [];
+  let pass = 0, fail = 0;
+  const show = () => { document.getElementById('out').textContent = ['RESULT pass=' + pass + ' fail=' + fail].concat(out).join('\n'); };
+  function ok(c, name, extra) { if (c) pass++; else fail++; out.push((c ? 'PASS ' : 'FAIL ') + name + (extra ? '  [' + extra + ']' : '')); show(); }
+  const qs = new URLSearchParams(location.search);
+  const BASE = qs.get('base') || 'http://127.0.0.1:8000';
+  const HOST = BASE.replace(/^https?:\/\//, '');
+  out.push('origin=' + location.origin + '  server=' + BASE);
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  /** 1X 근처 속도로 실제 시간과 함께 진행 (4 ms 틱) */
+  async function run(code, opts) {
+    opts = opts || {};
+    const sim = new VS.Simulator();
+    if (opts.cpi !== undefined) sim.runtime.cpi = opts.cpi;
+    if (opts.setup) opts.setup(sim);
+    const outs = [];
+    sim.on('console', (m) => { if (m.kind === 'out') outs.push(m.text); else if (m.kind === 'err') outs.push('ERR ' + m.text); });
+    sim.runScript(code, 'e2e.lua'); sim._applyActions();
+    const t0 = performance.now();
+    while (sim.runtime.state === 'running' && performance.now() - t0 < (opts.ms || 4000)) {
+      sim._applyActions();
+      sim._chunk(sim.simTime + 0.004, performance.now() + 50);
+      if (opts.each) opts.each(sim);
+      await sleep(4);
+    }
+    sim.stopScript(); sim._applyActions();
+    return { sim: sim, outs: outs, rt: sim.runtime };
+  }
+  try {
+    // (1) HTTP: info / text / binary 프레임 (바이너리 = string.unpack, 텍스트와 같은 값)
+    {
+      const r = await run([
+        'local B = "' + BASE + '"',
+        'local info, st = http_get(B .. "/api/info")',
+        'print("info", st, info and info:match("frames=(%d+)"), info and info:match("fps=([%d.]+)"))',
+        'local txt = http_get(B .. "/api/frame/7")',
+        'local bin, st2, h = http_get(B .. "/api/frame/7?fmt=bin")',
+        'local t = {} for v in txt:gmatch("%d+") do t[#t + 1] = tonumber(v) end',
+        'local same, pos = #bin == 2 * #t, 1',
+        'for i = 1, #t do local v; v, pos = string.unpack("<I2", bin, pos); if v ~= t[i] then same = false end end',
+        'print("frame7", #t // 2, #bin, same, h["content-type"])',
+        'local b404, s404 = http_get(B .. "/api/frame/99999")',
+        'print("404", s404)',
+        'local echo = http_post(B .. "/api/echo", string.char(0, 1, 128, 255), { content_type = "application/octet-stream" })',
+        'print("echo", #echo, echo:byte(3), echo:byte(4))',
+        'local bad, err = http_get("http://127.0.0.1:1/x")',
+        'print("refused", bad, err ~= nil)'
+      ].join('\n'), { cpi: 0 });
+      const o = r.outs;
+      ok(/^info\t200\t250\t25$/.test(o[0] || ''), 'http: /api/info (실제 서버)', o[0]);
+      ok(/^frame7\t\d+\t\d+\ttrue\tapplication\/octet-stream$/.test(o[1] || ''), 'http: 텍스트 프레임 = 바이너리 프레임 (string.unpack, 바이트 무손실)', o[1]);
+      ok(o[2] === '404\t404', 'http: 범위 밖 프레임 → 404', o[2]);
+      ok(o[3] === 'echo\t4\t128\t255', 'http: POST 바이너리 본문 왕복', o[3]);
+      ok(o[4] === 'refused\tnil\ttrue', 'http: 연결 거부 → nil, 오류 (스크립트 계속)', o[4]);
+    }
+    // (2) WebSocket: 명령 / 바이너리 / 스트림 수신 속도
+    {
+      const r = await run([
+        'local ws = assert(ws_open("ws://' + HOST + '/ws"))',
+        'ws:send("frame 7 bin")',
+        'local m = ws:recv(1)',
+        'local h = http_get("' + BASE + '/api/frame/7?fmt=bin")',
+        'print("wsbin", m == h, #m)',
+        'local t0 = sim_time()',
+        'ws:send("stream 0 20 50")',
+        'local n = 0',
+        'while n < 20 do local x, e = ws:recv(2) if not x then print("recv", e) break end n = n + 1 end',
+        'printf("stream %d %.2f", n, sim_time() - t0)',
+        'ws:send("bogus")',
+        'print("err", ws:recv(1))',
+        'ws:close()'
+      ].join('\n'), { cpi: 0 });
+      const o = r.outs;
+      ok(o[0] && o[0].startsWith('wsbin\ttrue\t'), 'ws: frame bin = HTTP 바이너리 프레임', o[0]);
+      const m = /^stream (\d+) ([\d.]+)$/.exec(o[1] || '');
+      ok(m && +m[1] === 20 && +m[2] > 0.25 && +m[2] < 1.5, 'ws: stream 50 fps × 20 프레임 수신 (≈0.4 s, 시뮬레이션 시계 1X 진행)', o[1]);
+      ok(o[2] === 'err\terror unknown command: bogus', 'ws: 오류 응답', o[2]);
+    }
+    // (3) 예제 11 / 12 (데모 서버, 실제 시간 3 s)
+    for (const name of ['11_net_http_frames.lua', '12_net_ws_stream.lua']) {
+      const ex = VS.EXAMPLES.find(e => e.name === name), st = ex.setup;
+      const xs = new Set();
+      const r = await run(ex.code.split('127.0.0.1:8000').join(HOST), {
+        cpi: st.cpi, ms: 3000,
+        setup: (sim) => { sim.setProbe(0, 5); sim.setProbe(1, 6); sim.scope.setMode('xy'); Object.assign(sim.scope.s.xy, st.xy); },
+        each: (sim) => { const bps = sim.inputs[0].tl.bps; if (bps.length) xs.add(bps.length + ':' + bps[bps.length - 1].t.toFixed(3)); }
+      });
+      const rec = r.sim.scope.xyRecord();
+      let inRange = 0;
+      if (rec) for (let i = 0; i < rec.n; i++) if (rec.x[i] > 0.05 && rec.x[i] < 3.25 && rec.y[i] > 0.05 && rec.y[i] < 3.25) inRange++;
+      const errs = r.outs.filter(s => s.startsWith('ERR'));
+      ok(errs.length === 0 && r.sim.simTime > 1 && rec && rec.n >= 10000 && inRange / rec.n > 0.9,
+        'example ' + name + ' (실제 서버)', 'sim ' + r.sim.simTime.toFixed(2) + ' s, xy pts ' + (rec ? rec.n : 0) + ', 화면 내 ' + (rec ? (100 * inRange / rec.n).toFixed(0) : 0) + '% | ' + r.outs.slice(0, 2).join(' | '));
+    }
+  } catch (e) { fail++; out.push('EXCEPTION ' + e + '\n' + e.stack); }
+  show();
+  document.title = 'DONE';
+})();
+</script></body></html>

@@ -1,0 +1,452 @@
+# 다른 agent를 위한 프로젝트 탐색 지도. 경로는 저장소 루트 기준이다.
+schema_version: 1
+metadata:
+  reviewed_on: '2026-11-05'
+  language: ko
+  purpose: 파일 역할, 코드 연결 관계, 기능별 수정 위치와 검증 방법을 빠르게 찾기 위한 안내
+  basis: 직접 확인한 소스 코드, HTML 로딩 순서, 테스트 및 요구사항 문서
+  coverage: 저장소의 프로젝트 파일 전체. .git 내부 데이터와 로컬 생성물은 제외한다.
+  authority: 탐색용 문서이며 실제 동작은 소스 코드, 요구 범위는 요구사항 문서에서 확인한다.
+
+project:
+  name: SignalScope
+  description: Lua로 GPIO/PWM/DAC 출력을 제어하고 2채널 가상 오실로스코프로 Y-T/XY 파형을 관측하는 웹 시뮬레이터
+  stack: [HTML, CSS, JavaScript, Lua 5.3, Canvas 2D, SVG, fengari]
+  entrypoint: index.html
+  module_style: 각 JS 파일의 IIFE가 전역 VS 네임스페이스를 구성하며 HTML의 script 순서대로 로드된다.
+  build: 빌드 및 패키지 설치 불필요. package.json과 번들러 설정이 없다. 선택 도구인 데이터 서버만 Python(표준 라이브러리, parquet 사용 시 pyarrow/numpy)이 필요하다.
+  launch:
+    direct: index.html을 브라우저에서 연다.
+    local_server: '저장소 루트에서 python -m http.server 실행 후 http://localhost:8000/ 접속'
+    data_server: '네트워크 예제/외부 데이터용: 앱과 별도로 python tools/signal_server.py --demo (또는 --parquet FILE) 실행. 데이터만 제공하므로 앱은 index.html로 연다.'
+  browser_notes:
+    - README는 Chrome/Edge를 권장하며 Firefox도 지원한다고 안내한다.
+    - PC 폴더 연결은 showDirectoryPicker 지원 여부에 의존한다.
+
+navigation:
+  first_read: [README.md, PROJECT_STRUCTURE.yaml, index.html, js/main.js, js/sim.js]
+  requirements: [요구사항목록/요구사항.md, 요구사항목록/요구사항_2.md]
+  directories:
+    css/: 전체 UI 스타일
+    js/: 시뮬레이션 코어, 스크립트 실행기, 화면 및 앱 구성
+    examples/: 다운로드하거나 편집기에 불러올 수 있는 독립 Lua 예제 13개 (11, 12는 데이터 서버 필요)
+    lib/: 저장소에 포함된 외부 Lua VM 번들과 라이선스
+    tests/: 브라우저 코어 테스트, Git Bash 실행 스크립트, 데이터 서버 테스트, 실제 네트워크 종단 간 테스트
+    tools/: 브라우저 앱과 별도로 실행하는 Python 데이터 서버 (HTTP/WebSocket/UDP·TCP 중계)
+    요구사항목록/: 기본 기능 및 XY 모드 요구사항
+
+architecture:
+  # index.html의 실제 script src 순서. 새 파일을 추가하면 이 순서도 함께 검토한다.
+  script_load_order:
+    - lib/fengari-web.js
+    - js/util.js
+    - js/signal.js
+    - js/board.js
+    - js/vfs.js
+    - js/net.js
+    - js/lua_prelude.js
+    - js/lua_runtime.js
+    - js/scope.js
+    - js/sim.js
+    - js/ui_controls.js
+    - js/ui_editor.js
+    - js/examples.js
+    - js/ui_pins.js
+    - js/ui_script.js
+    - js/scope_view.js
+    - js/scope_view_xy.js
+    - js/ui_scope.js
+    - js/main.js
+  composition:
+    - DOMContentLoaded에서 App을 생성하고 window.app에 보관한다.
+    - App이 Simulator, WindowManager, PinsWindow, ScriptWindow, ScopePanel, ScopeView를 구성한다.
+    - Simulator가 Board, VFS, 핀별 PinFilter, 채널별 ScopeInput, SignalRouter, Scope, LuaRuntime을 소유한다.
+    - LuaRuntime이 HTTP/WebSocket 요청과 수신 큐를 관리하는 NetHub를 소유한다.
+    - scope_view_xy.js는 별도 뷰 클래스 대신 VS.ScopeView.prototype에 XY 메서드를 추가한다.
+  simulation_tick:
+    - Simulator._applyActions가 대기 중 GUI 변경을 현재 simTime에 적용한다.
+    - Simulator._chunk에서 LuaRuntime.run이 목표 시각 또는 실행 예산까지 스크립트를 진행한다.
+    - SignalRouter.flush가 핀 이벤트를 PinFilter와 연결된 ScopeInput에 전달한다.
+    - Scope.process가 동일 시간 구간에서 트리거/레코드 또는 XY 샘플 쌍을 획득한다.
+    - 필요한 Timeline 이력만 남긴 뒤 simTime을 실제 진행 시각으로 갱신한다.
+  signal_path:
+    - Lua API 래퍼 및 JS 바인딩
+    - Board/Pin 레지스터 변경과 raw 신호 이벤트
+    - PinFilter의 독립 LPF/HPF 상태
+    - Probe 연결 및 ScopeInput의 DC/AC/GND 커플링 Timeline
+    - Scope의 ADC 양자화와 선택적 잡음
+    - Y-T record 또는 XY 링버퍼
+    - ScopeView의 Canvas 렌더링 또는 CSV 직렬화
+  scheduling:
+    simulation: 'js/sim.js: setTimeout 기반, 일반 속도 약 4 ms 간격, MAX는 틱 실행 예산 적용'
+    rendering: 'js/main.js: requestAnimationFrame에서 ScopeView.render와 ScriptWindow.tick 호출'
+    status_ui: 'js/main.js: 100 ms 간격으로 핀 상태, 스코프 패널, 상단 표시 갱신'
+  invariants:
+    - 시간 단위는 기본적으로 초이며 스크립트 실행과 획득은 같은 Simulation Clock을 사용한다.
+    - GUI의 핀/프로브/커플링 변경은 Simulator의 큐를 통해 시뮬레이션에 반영한다.
+    - Scope STOP은 획득만 멈추고 Simulation Pause는 보드와 계측기의 가상 시간을 멈춘다.
+    - 스크립트 정지는 Lua 실행만 중단하며 보드 출력은 마지막 상태를 유지한다.
+    - PinFilter 상태는 프로브 연결 여부와 독립적이다.
+    - Y-T 레코드와 XY 샘플 전압은 화면 좌표와 분리하여 보관한다.
+    - 'Y-T 수평 파라미터는 n / fs = 10 * Time/div 관계로 계산한다.'
+    - XY는 동일한 ta, dt로 두 Timeline을 샘플링하여 같은 시각의 CH1/CH2를 좌표 쌍으로 만든다.
+    - XY에서 Probe 미연결, 핀 Disable 또는 채널 OFF이면 Hold 상태로 획득/표시를 중단한다.
+    - XY 잔상은 획득 샘플 시각을 기준으로 감쇠하므로 Pause/STOP 중에는 감쇠도 멈춘다.
+    - 네트워크 대기는 Simulation Clock을 멈추지 않는다. 대기형 호출(http_get, req:wait, ws:recv, ws_open)은 delay처럼 스크립트만 재우고 출력은 마지막 값을 유지한다.
+    - 네트워크 결과는 JS 이벤트 처리 후 다음 run()부터 보인다. 대기 종료 시 직전 run()이 확정한 시각(tReached) 직후 클럭 엣지에서 재개한다.
+    - 대기 timeout은 시뮬레이션 시간, HTTP net_timeout은 실제 시간이다. 스크립트 정지/종료/오류 시 NetHub.reset이 요청을 취소하고 소켓을 닫는다.
+    - Lua 문자열과 네트워크 데이터는 Uint8Array로 바이트 그대로 오간다. 파일 VFS 경로는 텍스트(UTF-8) 기준이라 바이너리를 보존하지 않는다.
+
+# symbols는 탐색용 대표 심볼이며 전체 API 목록이 아니다.
+# depends_on은 주로 사용하는 내부 파일 관계이며 전이 의존성과 모든 콜백을 열거하지 않는다.
+files:
+  PROJECT_STRUCTURE.yaml:
+    role: 다른 agent를 위한 구조 및 변경 영향 안내. 현재 파일
+    kind: documentation
+  README.md:
+    role: 실행법, 화면 조작, 요구사항 대응, 신호 모델, Lua API 요약, 예제 및 테스트 안내
+    kind: documentation
+  index.html:
+    role: topbar/desktop 컨테이너, CSS 연결, VM과 프로젝트 JS의 순차 로딩
+    kind: entrypoint
+    related: [css/style.css, js/main.js]
+  .gitignore:
+    role: Git 제외 규칙. Python 테스트가 tools 모듈을 불러올 때 생기는 __pycache__/ 를 제외한다.
+    kind: configuration
+  css/style.css:
+    role: 테마, 상단 바, 창 배치, 공통 컨트롤, 핀 표, Lua 편집기/콘솔, 스코프 패널 스타일
+    kind: styles
+    landmarks: [':root', '.win', '.board-svg', '.editor', '.scope', '.scope-panel', '.xywarn']
+    related: [js/ui_controls.js, js/ui_editor.js, js/ui_pins.js, js/ui_script.js, js/ui_scope.js]
+
+  js/util.js:
+    role: 공학 단위 포맷/파싱, 1-2-5 목록, 클램프, 난수, localStorage 안전 래퍼, HTML 이스케이프
+    kind: shared
+    exports: [VS.util]
+    symbols: [fmtEng, fmtMeas, parseEng, seq125, nearestIndex, Rng, store, fmtSimTime]
+  js/signal.js:
+    role: 연속시간 신호 계산. RC 체인 해석해, PWM 주기 점프, Timeline 샘플링/최솟값·최댓값/교차 탐색
+    kind: simulation_core
+    exports: [VS.signal]
+    symbols: [rawConst, rawPWM, Chain, Timeline, stateAt, prepPWM, expSumCross, expSumMinMax]
+    methods: [Chain.step, Chain.pwmFixedPoint, Timeline.sample, Timeline.samplePeak, Timeline.findCrossing, Timeline.pruneBefore]
+    related: [js/board.js, js/scope.js, tests/test.html]
+  js/board.js:
+    role: 6개 핀의 레지스터/클럭/PWM 모델, 독립 핀 필터, 채널 입력과 이벤트 전달
+    kind: simulation_core
+    exports: [VS.board]
+    symbols: [PIN_DEFS, Pin, Board, PinFilter, ScopeInput, SignalRouter, getChain, TAU_AC, AC_FC]
+    depends_on: [js/signal.js, js/util.js]
+    details:
+      pins: {GPIO1: 1, GPIO2: 2, PWM1: 3, PWM2: 4, DAC1: 5, DAC2: 6}
+      defaults: 'CLK 10 MHz, 디지털 High/DAC 기준 3.3 V, DAC 12 bit, AC 커플링 차단주파수 10 Hz'
+      timing: PWM 주기/High 폭은 클럭 tick으로 양자화하며 출력 변경 이벤트를 핀별 큐에 보관한다.
+  js/vfs.js:
+    role: 텍스트 VFS, 경로 정규화, localStorage 보관, 선택적 PC 폴더 읽기 및 비동기 쓰기/삭제 반영
+    kind: storage
+    exports: [VS.VFS, VS.vfsNorm]
+    symbols: [VFS, norm]
+    methods: [VFS.read, VFS.write, VFS.rename, VFS.mount, VFS.syncFromDisk, VFS._pumpDisk]
+    depends_on: [js/util.js]
+    note: Lua에는 메모리 기반 동기 API를 제공하며 PC 디스크 반영은 별도 비동기 큐로 처리한다.
+  js/lua_prelude.js:
+    role: JS 문자열로 보관하는 Lua 프렐류드. 핀 상수, 시간/출력 래퍼, io/fs, 모듈 로딩 및 HTTP/WebSocket 래퍼
+    kind: scripting
+    exports: [VS.LUA_PRELUDE]
+    symbols: [every, delay, wait_until, gpio_write, analogWrite, io.open, fs, __io_flush_all, http_request, http_get, http_post, ws_open]
+    depends_on: [js/lua_runtime.js]
+    note: 실행 시 LuaRuntime이 등록한 __sync/__delay/__fs_* 등의 네이티브 바인딩을 사용한다.
+  js/lua_runtime.js:
+    role: fengari VM/코루틴 실행, CPI 명령어 시간, delay/yield와 예산 제어, 보드/VFS/네트워크 바인딩, 오류 줄 번호
+    kind: scripting
+    exports: [VS.LuaRuntime]
+    symbols: [LuaRuntime, HOOK_N, MAX_ZERO_TIME_INSTR, __net_wait, __http_start, __http_take, __ws_open, __ws_poll, __ws_send]
+    methods: [LuaRuntime.start, LuaRuntime.run, LuaRuntime._run, LuaRuntime.now, LuaRuntime._hook, LuaRuntime._registerAPI, LuaRuntime._flushFiles, LuaRuntime._release, LuaRuntime.waitInfo, LuaRuntime._edgeAfter]
+    depends_on: [lib/fengari-web.js, js/lua_prelude.js, js/board.js, js/vfs.js, js/net.js]
+    note: LuaRuntime.start가 JS 바인딩을 먼저 등록하고 프렐류드를 실행한 뒤 사용자 스크립트를 컴파일한다. 네트워크 대기는 waitCond/wakeResult/tReached로 _run 루프 안에서 처리하며, 대기형 호출은 메인 코루틴(this.co)에서만 허용한다. host.netImpl로 fetch/WebSocket 대체 구현을 주입할 수 있다(테스트용).
+  js/net.js:
+    role: HTTP fetch 요청/결과/취소, WebSocket 연결/송수신 큐, 바이트 데이터 변환과 네트워크 자원 정리
+    kind: networking
+    exports: [VS.NetHub, VS.NET_CONST]
+    symbols: [NetHub, DEFAULT_NET_TIMEOUT, MAX_REQUESTS, WS_MAX_QUEUE_MSGS, WS_MAX_QUEUE_BYTES]
+    methods: [NetHub.reset, NetHub.httpStart, NetHub.httpReady, NetHub.httpTake, NetHub.wsOpen, NetHub.wsPoll, NetHub.wsSend]
+    related: [js/lua_runtime.js, js/lua_prelude.js, tools/signal_server.py, tests/test.html, tests/net_e2e.html]
+    note: 브라우저 비동기 결과는 JS 이벤트 루프가 처리한 후 관측한다. 시뮬레이션 시간 기반 대기와 실제 시간 기반 HTTP 제한을 구분한다. 연결 전 ws send는 outbox에 보관했다가 open 시 전송하고, 수신 큐 초과 시 오래된 메시지부터 버린다(dropped).
+  js/scope.js:
+    role: Y-T/XY 획득 엔진, 설정 기본값과 범위, 트리거, ADC, Roll, 평균, 측정 및 CSV 직렬화
+    kind: acquisition
+    exports: [VS.Scope, VS.scopeMeasure, VS.xyPhase, VS.xyCSV, VS.ytCSV, VS.SCOPE_CONST]
+    symbols: [Scope, defaultSettings, measure, xyPhase, xyCSV, ytCSV]
+    methods: [Scope.horiz, Scope.process, Scope._capture, Scope._roll, Scope._adc, Scope.setMode, Scope._processXY, Scope.xyBlock, Scope.xyRecord]
+    depends_on: [js/util.js, js/board.js, js/signal.js]
+    note: XY 획득도 이 파일에 있다. scope_view_xy.js는 화면 확장이다.
+  js/sim.js:
+    role: 모델 객체 구성, Simulation Clock/속도/Pause, GUI 작업 큐, 실행/신호 전달/획득 순서와 이력 정리
+    kind: orchestration
+    exports: [VS.Simulator]
+    symbols: [Simulator]
+    methods: [Simulator.enqueue, Simulator._applyActions, Simulator._tick, Simulator._chunk, Simulator.setProbe, Simulator.resetSimulation]
+    depends_on: [js/board.js, js/vfs.js, js/lua_runtime.js, js/scope.js, js/util.js]
+  js/ui_controls.js:
+    role: 공용 DOM 생성, 창 이동/크기/표시/배치 저장, 노브, 선택 버튼, 토스트, 파일 선택/다운로드
+    kind: ui_shared
+    exports: [VS.ui]
+    symbols: [WindowManager, Knob, UI.el, UI.seg, UI.select, UI.toast, UI.download, UI.pickFile]
+    depends_on: [js/util.js]
+  js/ui_editor.js:
+    role: textarea와 강조 레이어 기반 Lua 편집기. 줄 번호, 오류 줄, 자동 들여쓰기, 실행/저장 단축키
+    kind: ui
+    exports: [VS.ui.CodeEditor, VS.ui.highlightLua]
+    symbols: [CodeEditor, highlight, API, CONST, KW]
+    depends_on: [js/ui_controls.js]
+  js/examples.js:
+    role: 브라우저 예제 메뉴와 코어 테스트에서 사용하는 내장 Lua 코드 및 권장 프로브/스코프 setup
+    kind: examples_catalog
+    exports: [VS.EXAMPLES]
+    related: [examples/, js/ui_script.js, js/main.js, tests/test.html, tests/net_e2e.html]
+    note: examples/*.lua를 fetch하지 않는다. 예제 수정 시 독립 Lua 파일과 이 파일의 code/setup을 함께 검토한다. setup.cpi를 지정할 수 있으며(예제 11, 12는 0), 지정하지 않은 예제를 불러오면 CPI가 1로 돌아간다.
+  js/ui_pins.js:
+    role: 창 1. 보드 SVG/핀 표, 최대 2개 Probe 연결/교환, LPF/HPF R·C 입력, Enable, 출력 상태
+    kind: ui
+    exports: [VS.ui.PinsWindow]
+    symbols: [PinsWindow]
+    methods: [PinsWindow.toggleProbe, PinsWindow.swap, PinsWindow.applyFilter, PinsWindow.refresh, PinsWindow.live]
+    depends_on: [js/ui_controls.js, js/util.js, js/sim.js]
+  js/ui_script.js:
+    role: 창 2. 편집/실행, CLK/CPI, Pause/속도, 콘솔, PC/VFS 파일 관리, 예제 선택, API 도움말(네트워크 포함), 네트워크 대기 상태 표시
+    kind: ui
+    exports: [VS.ui.ScriptWindow]
+    symbols: [ScriptWindow, API_DOC, CLK_LIST, CPI_LIST]
+    methods: [ScriptWindow.run, ScriptWindow.loadExample, ScriptWindow.renderFiles, ScriptWindow.openFromPC, ScriptWindow.saveToPC, ScriptWindow.updateState, ScriptWindow.tick]
+    note: tick이 LuaRuntime.waitInfo를 읽어 대기가 0.4 s를 넘으면 상태 표시에 'RUNNING · HTTP 응답 대기' 등을 붙인다.
+    depends_on: [js/ui_controls.js, js/ui_editor.js, js/examples.js, js/sim.js, js/util.js]
+  js/scope_view.js:
+    role: Y-T Canvas 화면, 10×8 눈금, min/max 축약 파형, 마커, 측정, Zoom/드래그 및 XY 입력 분기
+    kind: rendering
+    exports: [VS.ScopeView, VS.ZOOM_STEPS]
+    symbols: [ScopeView]
+    methods: [ScopeView.render, ScopeView._path, ScopeView._bindMouse, ScopeView.zoomStep]
+    depends_on: [js/scope.js, js/util.js]
+    related: [js/scope_view_xy.js, js/main.js]
+    note: render와 마우스 핸들러가 XY 확장 메서드를 호출하므로 XY 파일도 앱 시작 전에 로드해야 한다.
+  js/scope_view_xy.js:
+    role: ScopeView의 XY 확장. 전압 좌표 매핑, Line/Dot/Persistence, 축/0 V/마커, Zoom/오버뷰, Hold 안내, 위상 측정 표시
+    kind: rendering_extension
+    exports: [VS.XY_ZOOM_STEPS, VS.XY_COLOR]
+    extends: VS.ScopeView.prototype
+    symbols: [P._renderXY, P._xyPersist, P._xyRaster, P._xyMeasure, P.xyZoomStep, P.xyClearPersist]
+    depends_on: [js/scope_view.js, js/scope.js, js/util.js]
+  js/ui_scope.js:
+    role: 창 3 전면 패널. Run/Stop/Single, 모드, XY, 수직/수평/트리거/획득/표시 설정, CSV 버튼
+    kind: ui
+    exports: [VS.ui.ScopePanel]
+    symbols: [ScopePanel]
+    methods: [ScopePanel.ch, ScopePanel.set50, ScopePanel._updateXY, ScopePanel.update]
+    depends_on: [js/ui_controls.js, js/util.js, js/scope.js]
+    related: [js/main.js, js/scope_view.js, js/scope_view_xy.js]
+    note: XY에서는 Horizontal/Trigger/Acquire 섹션과 FORCE를 비활성화한다.
+  js/main.js:
+    role: 앱 진입/통합. 세 창과 상단 바, 렌더 루프, 설정 복원/저장, 모드 전환, 예제 setup(프로브/필터/스코프/CPI), Autoset, CSV 다운로드
+    kind: application
+    exports: [window.app]
+    symbols: [App, merge, STATE_KEY]
+    methods: [App.setScopeMode, App.applySetup, App.autoset, App._autosetXY, App.saveCSV, App.saveNow, App.load]
+    depends_on: [js/sim.js, js/ui_controls.js, js/ui_pins.js, js/ui_script.js, js/ui_scope.js, js/scope_view.js, js/scope_view_xy.js, js/util.js]
+
+  lib/fengari-web.js:
+    role: 저장소에 포함된 minify된 외부 fengari-web 번들. Lua 5.3 VM과 JS 바인딩 제공
+    kind: vendor
+    exports: [window.fengari]
+    related: [lib/fengari-web.LICENSE.txt, js/lua_runtime.js]
+    note: 프로젝트 로직은 js/의 실행기와 래퍼에 있으며 이 파일은 외부 의존성 번들이다.
+  lib/fengari-web.LICENSE.txt:
+    role: fengari-web의 MIT 라이선스와 저작권 고지
+    kind: license
+
+  examples/00_quickstart.lua:
+    role: GPIO1 1 kHz 토글, PWM1 2 kHz/25%, DAC1 1.2 V와 레지스터 출력
+    kind: lua_example
+  examples/01_gpio_registers.lua:
+    role: 두 GPIO 반대 위상 토글, 레지스터 읽기, 비트 연산과 조건문
+    kind: lua_example
+  examples/02_pwm_sweep.lua:
+    role: PWM1 듀티 스윕과 PWM2 주파수 전환
+    kind: lua_example
+  examples/03_dac_waves.lua:
+    role: 10 kHz 갱신으로 DAC 사인파와 삼각파 생성
+    kind: lua_example
+  examples/04_uart_bitbang.lua:
+    role: GPIO2에서 클럭 tick 절대시각 대기를 사용한 9600 bps UART 8N1 송신
+    kind: lua_example
+  examples/05_pwm_rc_dac.lua:
+    role: 같은 PWM을 원 신호/RC LPF 경로로 비교하고 Peak Detect로 포락선 관측
+    kind: lua_example
+    note: 권장 LPF와 획득 설정은 js/examples.js의 setup에 정의되어 있다.
+  examples/06_file_playback.lua:
+    role: wave.csv 생성/읽기, DAC 파형 재생, 첫 재생 결과를 log.txt에 기록
+    kind: lua_example
+    note: wave.csv와 log.txt는 실행 시 VFS에 생성하는 데이터이며 저장소 소스 파일이 아니다.
+  examples/07_glitch.lua:
+    role: 100 ms마다 1 µs 펄스를 출력하여 Sample/Peak Detect/Single 비교
+    kind: lua_example
+  examples/08_cpu_timing.lua:
+    role: delay 없는 GPIO 토글 버스트로 CLK/CPI 명령어 실행시간 확인
+    kind: lua_example
+  examples/09_xy_lissajous.lua:
+    role: 두 DAC의 주파수비/위상차를 전환하여 XY 원, 타원, 리사주 도형 관측
+    kind: lua_example
+  examples/10_xy_rc_phase.lua:
+    role: 원 사인파와 DAC2 LPF 출력을 XY로 비교하고 이론 위상차/진폭비 출력
+    kind: lua_example
+    note: 권장 LPF와 XY 모드 설정은 js/examples.js의 setup에 정의되어 있다.
+  examples/11_net_http_frames.lua:
+    role: HTTP로 데이터 서버의 프레임(점 집합)을 8개 앞서 요청하고 XY Dot 산점도로 재생. 미도착 시 이전 프레임 유지
+    kind: lua_example
+    related: [tools/signal_server.py]
+    note: 기본 주소 http://127.0.0.1:8000, 서버가 없으면 1초마다 재시도. setup은 DAC1/DAC2 프로브, XY Dot, 500 kSa/s·20 kpts, CPI 0.
+  examples/12_net_ws_stream.lua:
+    role: WebSocket으로 서버가 실시간 fps로 push하는 프레임 중 최신 것만 XY로 표시 (라이브 소스, /relay 중계에도 사용)
+    kind: lua_example
+    related: [tools/signal_server.py]
+    note: 기본 주소 ws://127.0.0.1:8000/ws. setup은 예제 11과 같다.
+
+  tools/signal_server.py:
+    role: 앱과 별도로 실행하는 데이터 전용 서버. HTTP 프레임 API, WebSocket 프레임 명령/실시간 스트림, UDP/TCP→WebSocket 중계, parquet/데모 프레임 소스
+    kind: tool
+    symbols: [FrameSource, DemoSource, ParquetSource, FrameCache, WSConn, Relay, Handler, Server, build_server, main]
+    endpoints: ['GET /api/info', 'GET /api/frame/<k>[?fmt=bin]', 'GET /api/frames?start&count', 'POST /api/echo', 'ws /ws', 'ws /relay']
+    related: [examples/11_net_http_frames.lua, examples/12_net_ws_stream.lua, tests/test_signal_server.py, tests/run_net_e2e.py]
+    note: 표준 라이브러리만 사용하며 --parquet일 때만 pyarrow/numpy를 import한다. parquet은 long(행=점, frame 열) 또는 list(행=프레임, x/y 리스트) 레이아웃이고 전체 범위를 0..dac_max로 변환한다. Windows에서는 같은 포트 중복 bind를 막기 위해 SO_REUSEADDR를 쓰지 않는다.
+
+  tests/test.html:
+    role: VM/코어/예제만 로드하는 자체 브라우저 테스트. PASS/FAIL과 최종 RESULT를 pre#out에 표시
+    kind: test
+    symbols: [ok, near, sec, ONLY, netTests, mockFetch, MockWS]
+    related: [tests/run_tests.sh, js/examples.js, js/net.js]
+    note: UI 스크립트와 CSS는 로드하지 않으므로 화면/마우스/창 배치의 시각적 동작은 검증하지 않는다. 섹션 1~11은 동기, 섹션 12는 모의 fetch/WebSocket과 이벤트 루프 양보가 필요한 비동기 섹션이며 끝난 뒤 RESULT를 기록한다.
+  tests/run_tests.sh:
+    role: headless Chrome으로 test.html을 실행하고 Python으로 pre#out의 결과를 추출
+    kind: test_runner
+    related: [tests/test.html]
+  tests/test_signal_server.py:
+    role: 데이터 서버 단위 테스트 (HTTP API/CORS/앱 파일 비노출/포트 중복, WebSocket 명령·스트림 속도·대용량 프레임, UDP/TCP 중계, parquet 레이아웃)
+    kind: test
+    related: [tools/signal_server.py]
+    note: 'python tests/test_signal_server.py -v 로 실행한다. 일부 환경에는 tests라는 이름의 다른 패키지가 설치되어 python -m unittest tests/... 가 실패할 수 있다. pyarrow/numpy가 없으면 parquet 테스트는 skip된다.'
+  tests/net_e2e.html:
+    role: 실제 데이터 서버와 브라우저 Lua 사이의 HTTP/WebSocket 종단 간 테스트 페이지 (예제 11, 12 포함)
+    kind: test
+    related: [tests/run_net_e2e.py, tools/signal_server.py, js/net.js]
+    note: '?base=http://127.0.0.1:PORT 로 서버 주소를 지정한다 (생략 시 포트 8000). 완료 시 document.title을 DONE으로 바꾼다.'
+  tests/run_net_e2e.py:
+    role: 데모 서버를 띄우고 headless Chrome을 DevTools 프로토콜로 제어해 net_e2e.html을 file://로 열어 실행
+    kind: test_runner
+    related: [tests/net_e2e.html, tools/signal_server.py]
+    note: 실제 시간과 네트워크가 필요하므로 --dump-dom(로드 직후 덤프)이 아니라 title=DONE이 될 때까지 기다린다. 결과 중 하나라도 fail이 있으면 종료 코드 1.
+  요구사항목록/요구사항.md:
+    role: 세 창, 핀/필터/스크립트/계측기, Simulation Clock 및 STOP/Pause 분리의 기본 요구사항
+    kind: requirements
+  요구사항목록/요구사항_2.md:
+    role: XY 모드, 동일 시각 샘플 쌍, 축/잔상/Zoom/CSV 및 비활성 채널 처리 요구사항
+    kind: requirements
+
+persistence:
+  backend: 브라우저 localStorage. 시뮬레이션 시간/획득 레코드 자체는 저장 대상으로 구성되어 있지 않다.
+  keys:
+    vscope.state.v1:
+      owner: js/main.js
+      content: 핀/프로브, 편집 코드/이름/CLK/CPI, 스코프 설정/Run 여부, 시뮬레이션 속도
+    vscope.layout.v1:
+      owner: js/ui_controls.js
+      content: 창 위치/크기/표시/최대화 및 사용자 배치 여부
+    vscope.vfs.v1:
+      owner: js/vfs.js
+      content: 가상 파일 이름과 텍스트 내용
+
+testing:
+  browser: tests/test.html을 브라우저로 열고 RESULT의 pass/fail 및 EXCEPTION을 확인한다.
+  section_selection: '주소 끝에 #4,6처럼 섹션 번호를 쉼표로 붙인다.'
+  git_bash:
+    all: sh tests/run_tests.sh
+    selected: sh tests/run_tests.sh 4,6
+    prerequisites: Git Bash의 sh/timeout, Python, Chrome 실행 파일
+    environment:
+      CHROME: '기본값 /c/Program Files/Google/Chrome/Application/chrome.exe. 다른 설치 경로는 환경변수로 지정'
+      TEST_TIMEOUT: '기본값 90초. Chrome virtual-time-budget는 스크립트에서 30000 ms로 고정'
+    result_check: 셸 종료 코드만으로 판단하지 말고 출력의 RESULT fail=0 및 EXCEPTION/NO OUTPUT 여부를 확인한다.
+  sections:
+    '1': RC Chain.step 해석해와 RK4 수치적분 비교
+    '2': PWM 주기 점프와 모든 엣지 적분 비교
+    '3': PWM+LPF Timeline 샘플링
+    '4': 트리거 레벨 교차 시각 탐색
+    '5': 짧은 글리치와 고주파 PWM의 Peak Detect
+    '6': Lua 시간/파일/비트 연산/레지스터/코루틴/API 오류
+    '7': CPI 실행시간, 클럭 정렬 및 오류 줄 번호
+    '8': 전체 시뮬레이터 획득/주파수/듀티/LPF/AC 커플링
+    '9': 샘플링 성능, Average 잡음 감소, Single/FORCE, MAX 속도 예산
+    '10': 내장 예제 전체 실행과 획득
+    '11': XY 동일 시각 쌍, 필터/커플링, 원/위상, Hold/재개, STOP/Single, CSV, Y-T 복귀와 성능
+    '12': 네트워크(모의 fetch/WebSocket). 대기 중 시계 진행·출력 유지, 비동기 확인, 시뮬레이션 시간 timeout, 바이너리 무손실, 오류/종료, coroutine 제한, 정지 시 정리, 예제 11·12
+  data_server:
+    unit: python tests/test_signal_server.py -v
+    end_to_end: python tests/run_net_e2e.py
+    prerequisites: Python, Chrome (parquet 테스트는 pyarrow/numpy)
+    result_check: 'unit은 OK, end_to_end는 RESULT ... fail=0 및 종료 코드 0을 확인한다.'
+
+change_routes:
+  # task별로 먼저 읽을 파일과 관련 테스트 섹션. GUI 변경은 실제 앱에서도 확인한다.
+  - task: GPIO/PWM/DAC 핀이나 레지스터 동작 변경
+    read: [js/board.js, js/lua_runtime.js, js/lua_prelude.js, js/ui_pins.js]
+    test_sections: [6, 7, 8, 10]
+  - task: 필터, AC 커플링, PWM 해석 및 트리거 교차 계산 수정
+    read: [js/signal.js, js/board.js, js/scope.js]
+    test_sections: [1, 2, 3, 4, 5, 8, 11]
+  - task: 시뮬레이션 시간, 속도, Pause 또는 GUI 변경 반영 순서 수정
+    read: [js/sim.js, js/lua_runtime.js, js/main.js]
+    test_sections: [6, 7, 8, 9, 11]
+  - task: Lua API 추가 또는 파일 입출력 동작 수정
+    read: [js/lua_runtime.js, js/lua_prelude.js, js/vfs.js, js/ui_script.js, js/ui_editor.js]
+    test_sections: [6, 7, 10]
+    note: API_DOC 도움말, 편집기 API 강조 목록 및 README API 안내도 함께 확인한다.
+  - task: HTTP/WebSocket 통신 또는 외부 응답 대기 수정
+    read: [js/net.js, js/lua_runtime.js, js/lua_prelude.js, js/sim.js, js/ui_script.js]
+    test_sections: [6, 7, 10, 12]
+    note: 섹션 12가 모의 fetch/WebSocket으로 비동기 대기·시간 초과·중단 처리를 검증한다. 실제 서버와의 연동은 python tests/run_net_e2e.py 로 확인한다.
+  - task: 데이터 서버(프레임 API, WebSocket 명령, UDP/TCP 중계, parquet 변환) 수정
+    read: [tools/signal_server.py, examples/11_net_http_frames.lua, examples/12_net_ws_stream.lua, README.md]
+    test_sections: [12]
+    note: python tests/test_signal_server.py -v 와 python tests/run_net_e2e.py 를 실행한다. API 형식을 바꾸면 예제 11·12와 README 네트워크 절도 함께 고친다.
+  - task: Y-T 획득, ADC, 측정, 트리거/평균/Roll 동작 수정
+    read: [js/scope.js, js/signal.js, js/ui_scope.js, js/scope_view.js]
+    test_sections: [4, 5, 8, 9]
+  - task: XY 획득/표시/모드 전환/잔상 수정
+    read: [요구사항목록/요구사항_2.md, js/scope.js, js/scope_view.js, js/scope_view_xy.js, js/ui_scope.js, js/main.js]
+    test_sections: [10, 11]
+    note: Line/Dot/Persistence, 두 축 마커/Zoom, Hold 안내, Pause/STOP 잔상은 앱에서 직접 확인한다.
+  - task: CSV 형식 또는 다운로드 동작 수정
+    read: [js/scope.js, js/main.js, js/ui_scope.js, js/ui_controls.js]
+    test_sections: [11]
+  - task: 창 배치, 스타일, 편집기 또는 마우스 조작 수정
+    read: [css/style.css, js/ui_controls.js, js/ui_editor.js, js/scope_view.js, js/scope_view_xy.js, js/main.js]
+    test_sections: []
+    note: index.html에서 실제 화면/단축키/크기조절/저장 복원을 확인한다. 코어 테스트에는 UI 검증이 없다.
+  - task: 예제 추가 또는 변경
+    read: [examples/, js/examples.js, js/ui_script.js, js/main.js, README.md]
+    test_sections: [10, 11, 12]
+    note: 독립 Lua 파일과 VS.EXAMPLES의 name/title/code/setup을 맞추고 XY 예제이면 섹션 11, 네트워크 예제이면 섹션 12와 run_net_e2e.py도 확인한다.
+  - task: 설정 저장 형식 또는 복원 동작 수정
+    read: [js/main.js, js/ui_controls.js, js/ui_pins.js, js/ui_script.js, js/vfs.js]
+    test_sections: []
+    note: persistence의 소유 파일을 기준으로 기존 저장값 병합 및 재실행 후 복원을 직접 확인한다.
+
+maintenance:
+  update_when:
+    - 파일 추가/삭제/이동 시 files와 navigation을 갱신한다.
+    - JS 추가/로딩 관계 변경 시 index.html과 script_load_order 및 테스트 HTML의 로딩 목록을 함께 확인한다.
+    - 공개 심볼, 책임 경계, 저장 키, 테스트 섹션 변경 시 해당 항목을 갱신한다.
+    - 예제의 코드 또는 권장 설정 변경 시 js/examples.js와 examples/*.lua의 대응을 확인한다.
+  conventions:
+    - 파일 경로는 저장소 상대 경로와 슬래시(/)를 사용한다.
+    - 줄 번호 대신 클래스/함수 이름을 탐색 기준으로 사용하여 코드 삽입으로 인한 안내 노후화를 줄인다.
+    - 자동 생성 파일이 아니므로 구조 변경 작업과 함께 수동 갱신한다.
+    - reviewed_on은 마지막으로 소스와 구조를 대조한 날짜로 갱신한다.

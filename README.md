@@ -14,13 +14,14 @@ GPIO / GPIO_PWM / DAC 출력 신호를 **가상 오실로스코프로 측정하�
 3. 설정(핀 필터/프로브, 스크립트, 스코프 설정, 창 배치)은 브라우저에 자동 저장되어 다음 실행 시 복원됩니다.
 
 > 로컬 서버로 열고 싶다면: `python -m http.server` 실행 후 `http://localhost:8000/` 접속.
+> 외부 데이터(HTTP / WebSocket)를 스크립트에서 받으려면 앱과 별도로 [네트워크](#네트워크-http--websocket) 의 데이터 서버 `tools/signal_server.py` 를 실행하세요.
 
 ## 화면 구성
 
 | 창 | 내용 |
 |---|---|
 | **창 1 · 출력 Pin 설정 및 Probe 배치** | 보드 다이어그램 + 핀 표. 핀(다이어그램 또는 체크박스)을 클릭/체크하여 Probe 지정(최대 2개 → CH1, CH2). 핀별 드롭다운: **Filter**(사용안함 / LPF(R-C) / HPF(C-R), 기본 "사용안함", R·C 값 입력 → τ, fc 표시), **Enable/Disable**(기본 Enable). 현재 출력값과 LED 표시. |
-| **창 2 · 출력 제어** | Lua 스크립트 편집기(구문 강조/줄 번호/오류 줄 표시), 실행/정지, **시뮬레이션 일시정지·재개, 속도(0.1X/1X/10X/MAX)**, 보드 클럭(CLK)·명령어 사이클(CPI) 설정, 콘솔, 파일 관리(가상 파일 시스템/PC 폴더 연결), API 도움말, 예제. |
+| **창 2 · 출력 제어** | Lua 스크립트 편집기(구문 강조/줄 번호/오류 줄 표시), 실행/정지, **시뮬레이션 일시정지·재개, 속도(0.1X/1X/10X/MAX)**, 보드 클럭(CLK)·명령어 사이클(CPI) 설정, 콘솔, 파일 관리(가상 파일 시스템/PC 폴더 연결), 네트워크(HTTP fetch / WebSocket), API 도움말, 예제. |
 | **창 3 · 오실로스코프** | 10×8 division 화면, CH1(노랑)/CH2(청록), **Display Format (Y-T / XY)**, XY / Vertical / Horizontal / Trigger / Acquire / Display 패널, 자동 측정(Freq, Period, Duty, Vpp, Vmax, Vmin, Vavg, Vrms), CSV 저장. |
 
 상단 바: 창 표시/숨김, 배치 초기화, 스크립트 상태, 시뮬레이션 상태(RUNNING/PAUSED)·Pause·속도, 시뮬레이션 시각과 실제 속도.
@@ -69,6 +70,7 @@ GPIO / GPIO_PWM / DAC 출력 신호를 **가상 오실로스코프로 측정하�
 | 출력 레지스터 읽기 (= 실제 출력) | `gpio_read`, `pwm_read`, `dac_read`, `pin_read`, `pin_voltage` |
 | 변수 / 대입·산술·비트 연산 / 조건문 | Lua 5.3 (`& | ~ << >> //` 지원, 정수 32bit) |
 | 파일 load, read/write | 편집기 **📂 열기/💾 저장**(PC 파일), 스크립트의 `io.open/io.lines/file:read/write/seek`, `fs.*`, `dofile/loadfile/require`. 파일은 가상 파일 시스템(브라우저 저장소)에 보관되며 **PC 폴더 연결** 시 실제 폴더에 기록 |
+| (확장) 외부 데이터 수신 | `http_request/http_get/http_post`, `ws_open` → `ws:send/recv/poll` (아래 [네트워크](#네트워크-http--websocket)) |
 
 ### 창 3 (오실로스코프)
 | 요구사항 | 구현 |
@@ -142,6 +144,60 @@ XY 측정: 채널별 Vpp/Vmax/Vmin/Vavg/Vrms/Freq, 두 채널 주파수가 같�
   가장 오래된 구간을 생략하며, 잔상 표시에서는 그 공백을 잇지 않습니다. Stop 은 획득만 멈추고(재개 시 새 궤적),
   Pause 는 시뮬레이션 시간 자체가 멈추므로 잔상 감쇠도 함께 정지합니다.
 
+## 네트워크 (HTTP / WebSocket)
+
+스크립트가 로컬 서버 등 외부에서 데이터를 받아 출력에 쓸 수 있습니다 (예: parquet 의 프레임별 점 집합 → DAC → XY 산점도).
+브라우저 페이지는 TCP/UDP 소켓을 직접 열 수 없으므로 HTTP fetch 와 WebSocket 을 제공하고, TCP/UDP 송신 프로그램은 서버의 중계 기능으로 연결합니다.
+
+**시간 모델** — 시뮬레이션 시계는 네트워크 대기와 무관하게 계속 흐릅니다. 응답을 기다리는 동안 무엇을 출력할지는 스크립트가 정합니다.
+
+- **비동기형**: `req = http_request(url)` 은 즉시 반환 → `req:ready()` 로 확인하며 그동안 하고 싶은 출력을 계속
+  (예: 이전 프레임을 계속 그리기). WebSocket 은 `ws:poll()` / `ws:available()`.
+- **대기형**: `http_get()`, `req:wait()`, `ws:recv()`, `ws_open()` 은 `delay()` 처럼 잠들어 기다립니다 (그동안 출력 레지스터는 마지막 값 유지).
+  `timeout` 은 **시뮬레이션 시간**(초)입니다. HTTP 의 `net_timeout`(실제 시간, 기본 15 s)은 서버가 응답하지 않을 때의 안전장치입니다.
+- 응답은 JS 이벤트 처리 후(다음 시뮬레이션 틱)에 보이며, 대기형 호출은 그 틱이 시작된 시각 직후 클럭 엣지에서 깨어납니다.
+  따라서 결과가 보이는 시뮬레이션 시각은 실제 지연 × 속도 배율만큼 늦어집니다 (MAX 속도에서는 같은 지연이 더 긴 시뮬레이션 시간이 됨).
+- 데이터는 **바이트 그대로** 전달됩니다 (텍스트/바이너리 무손실, 바이너리는 `string.unpack("<I2", s, pos)` 등으로 해석).
+- 스크립트가 정지/종료되면 진행 중인 요청은 취소되고 열린 WebSocket 은 닫힙니다.
+- 대기형 호출은 메인 스크립트에서만 가능합니다 (사용자 coroutine 안에서는 `ready()` / `poll()` 사용).
+
+```lua
+local body, status, headers = http_get("http://127.0.0.1:8000/api/info", { timeout = 2 })
+local req = http_request("http://127.0.0.1:8000/api/frame/0")      -- 비동기
+while not req:ready() do gpio_toggle(GPIO1); delay(1) end           -- 대기 중 출력은 스크립트가 결정
+local frame, st = req:result()
+
+local ws = assert(ws_open("ws://127.0.0.1:8000/ws"))
+ws:send("frame 3")             local msg = ws:recv(0.5)            -- nil, "timeout" | nil, "closed"
+local m = ws:poll()            -- 대기 없이 꺼내기 (없으면 nil)
+```
+
+### 데이터 서버 `tools/signal_server.py`
+
+앱에 데이터를 보내는 별도의 서버입니다. 앱은 지금처럼 `index.html` 을 직접 열어서 사용하며, 서버 응답의 `Access-Control-Allow-Origin: *` 로 접속합니다.
+표준 라이브러리만 사용합니다 (parquet 사용 시에만 `pip install pyarrow numpy`).
+
+```sh
+python tools/signal_server.py --demo                                   # 데모: 회전하는 점 구름 (250 프레임, 25 fps, 최대 3000 점)
+python tools/signal_server.py --parquet points.parquet --fps 30        # 열 자동 인식 (frame/x/y 등), 또는
+python tools/signal_server.py --parquet points.parquet --frame-col f --x-col px --y-col py --flip-y
+python tools/signal_server.py --demo --udp-port 9001 --tcp-port 9002   # UDP/TCP → WebSocket /relay 중계
+```
+
+| 경로 | 내용 |
+|---|---|
+| `GET /api/info` | `frames=… fps=… max_points=… total_points=… dac_max=… source=…` (key=value 줄) |
+| `GET /api/frame/<k>` | `x1,y1,x2,y2,…` DAC 코드(0..4095) 텍스트. `?fmt=bin` → little-endian uint16 |
+| `GET /api/frames?start=k&count=n` | 한 줄에 한 프레임 (최대 1000) |
+| `POST /api/echo` | 본문 그대로 반환 (연결 확인용) |
+| `ws://…/ws` | 명령: `info`, `frame <k> [bin]`, `stream [start] [count] [fps] [bin]`(실시간 push, count 0 = 무한), `stop`, `ping` |
+| `ws://…/relay` | `--udp-port`(데이터그램 1개 = 메시지 1개) / `--tcp-port`(줄 1개 = 메시지 1개) 수신 데이터를 그대로 전달. 브라우저가 보낸 메시지는 TCP 클라이언트와 마지막 UDP 송신자에게 전달 |
+
+- parquet 레이아웃: **long**(한 행 = 점, frame 열로 묶음) 또는 **list**(한 행 = 프레임, x/y 가 리스트 열). NaN 점은 제외.
+- 좌표 변환: 전체 데이터 범위 → 0..4095 (기본: 가로세로 비율 유지 + 5 % 여백, `--no-keep-aspect`, `--flip-y`, `--margin`).
+- 측정(이 PC): 1080 만 점(5400 프레임, 99 MB) parquet 로딩 0.75 s, 프레임 응답 중앙값 약 1 ms.
+  Lua 파싱(`gmatch`)은 3000 점 프레임당 약 6 ms(실제 시간)이므로 30 fps 1X 재생에 여유가 있습니다.
+
 ## 스크립트 API 요약
 
 ```lua
@@ -160,6 +216,9 @@ local f = io.open("log.csv", "w")  f:write("t,v\n")  f:close()
 for line in io.lines("wave.csv") do ... end
 fs.list()  fs.exists("a.txt")  fs.read("a.txt")  fs.write("a.txt", "...")  dofile("lib.lua")  require("mod")
 print(...)  printf("%.3f V", v)
+
+local req = http_request(url)  req:ready()  req:result()  req:wait(0.1)   http_get(url)  http_post(url, body)
+local ws = ws_open(url)  ws:send(s)  ws:recv(0.1)  ws:poll()  ws:available()  ws:state()  ws:close()
 ```
 
 전체 목록은 창 2 의 **API 도움말** 탭을 참고하세요.
@@ -180,8 +239,15 @@ print(...)  printf("%.3f V", v)
 | 08_cpu_timing | 명령어 실행시간(CPI) 모델과 비트뱅잉 속도 |
 | 09_xy_lissajous | **XY 모드**: DAC1/DAC2 사인파 리사주 도형 (1:1 원 → 1:2 → 3:2 → 3:4 → 45° 타원), Persistence |
 | 10_xy_rc_phase | **XY 모드**: 사인파 vs RC LPF 통과 사인파 → 위상 지연 타원, Δφ / 진폭비를 이론값과 비교 |
+| 11_net_http_frames | **네트워크(HTTP)**: 서버 프레임을 미리 요청(8 프레임)해 XY 산점도로 재생. 미도착 시 이전 프레임 유지. 서버 필요 |
+| 12_net_ws_stream | **네트워크(WebSocket)**: 서버가 실시간 fps 로 push 하는 프레임 중 최신 것만 표시 (라이브 소스 / `/relay` 중계용). 서버 필요 |
+
+예제 11, 12 는 CPI = 0 으로 설정됩니다. CPI ≥ 1 이면 파싱 시간 동안 빔이 한 점에 멈추고, X/Y 두 DAC 쓰기 사이의
+명령어 시간 동안 (새 X, 이전 Y) 위치에 점이 찍히기 때문입니다. 서버가 없으면 1 초마다 재연결을 시도합니다.
 
 ## 파일 구조
+
+다른 agent를 위한 파일별 역할, 의존 관계, 기능별 수정 위치 및 테스트 안내는 [`PROJECT_STRUCTURE.yaml`](PROJECT_STRUCTURE.yaml)을 참고하세요.
 
 ```
 index.html            진입점
@@ -191,7 +257,8 @@ js/util.js            단위 포맷/파싱 등 공용 유틸
 js/signal.js          신호 체인 해석 계산 (RC 단, PWM 주기 점프, 샘플링, Peak, 트리거 교차 탐색)
 js/board.js           보드/핀/레지스터, PinFilter(필터 단), ScopeInput(커플링), 이벤트 라우터
 js/vfs.js             가상 파일 시스템 + PC 폴더 연결
-js/lua_prelude.js     Lua 프렐류드 (API 래퍼, io 라이브러리, require)
+js/net.js             네트워크 계층 (HTTP fetch / WebSocket, 바이트 그대로 전달, 스크립트 정지 시 정리)
+js/lua_prelude.js     Lua 프렐류드 (API 래퍼, io 라이브러리, require, http/ws 래퍼)
 js/lua_runtime.js     스크립트 실행기 (코루틴, 명령어 시간 모델, API 바인딩)
 js/scope.js           오실로스코프 획득 엔진 (트리거, 획득 모드, ADC, Roll, 측정)
 js/sim.js             시뮬레이션 엔진 (Simulation Clock, 속도, Pause)
@@ -199,8 +266,11 @@ js/scope_view.js      오실로스코프 화면 렌더링/마우스 조작 (Y-T)
 js/scope_view_xy.js   XY 모드 화면 (Line/Dot/Persistence, 축 눈금/0 V 기준선, Zoom/오버뷰, 표시 중단 안내)
 js/ui_*.js, main.js   창/컨트롤/편집기/앱 구성
 examples/*.lua        예제 스크립트
+tools/signal_server.py  데이터 서버 (HTTP API + WebSocket + UDP/TCP 중계, parquet/데모 프레임)
 tests/test.html       코어 테스트 (브라우저로 열면 결과 표시)
 tests/run_tests.sh    헤드리스 Chrome 테스트 실행 (Git Bash)
+tests/test_signal_server.py  서버 테스트 (HTTP/WebSocket/중계/parquet)
+tests/net_e2e.html, run_net_e2e.py  실제 서버 ↔ 브라우저 Lua 종단 간 테스트
 ```
 
 ## 테스트
@@ -212,7 +282,15 @@ Git Bash 에서는 `sh tests/run_tests.sh` (특정 섹션: `sh tests/run_tests.s
 Peak Detect 글리치 보존, Lua 타이밍/파일 입출력/비트 연산/오류 줄 번호, 명령어 시간 모델과 클럭 정렬, 전체 시뮬레이터
 (주파수·듀티 측정, LPF·AC 커플링), 성능(1 Mpts), Average 잡음 감소, Single, MAX 속도 예산, 모든 예제 실행,
 XY 모드(섹션 11: 동일 시각 샘플 쌍, 필터/커플링 적용, 리사주 원·RC 위상, Probe 미연결/Disable/채널 OFF 시 중단·재개,
-Run/Stop/Single, CSV, Y-T 복귀, 1 MSa/s 연속 획득 성능).
+Run/Stop/Single, CSV, Y-T 복귀, 1 MSa/s 연속 획득 성능), 네트워크(섹션 12: 모의 fetch/WebSocket 으로 대기 중 시계 진행·출력 유지,
+비동기 확인, 시뮬레이션 시간 timeout, 바이너리 무손실, 오류/종료 처리, 스크립트 정지 시 정리, 예제 11·12).
+
+서버와 실제 네트워크:
+
+```sh
+python tests/test_signal_server.py -v      # 서버 단위 테스트 (pyarrow 가 있으면 parquet 포함)
+python tests/run_net_e2e.py                # 데모 서버 + 헤드리스 Chrome: file:// 로 연 페이지의 HTTP·WebSocket·예제 11·12
+```
 
 ## 참고 / 제약
 
@@ -220,3 +298,5 @@ Run/Stop/Single, CSV, Y-T 복귀, 1 MSa/s 연속 획득 성능).
 - `delay()` 계열은 메인 스크립트에서 호출해야 시뮬레이션 시간에 맞춰 일시정지됩니다. 사용자 코루틴 내부에서 호출하면
   일시정지 없이 보드 시간만 진행합니다.
 - 파일은 텍스트 파일 기준입니다. 가상 파일 시스템은 브라우저 저장소(약 5 MB)에 보관됩니다.
+  큰 데이터나 바이너리는 네트워크(HTTP / WebSocket)로 받으세요 (바이트 그대로 전달).
+- 네트워크 응답은 다음 시뮬레이션 틱부터 보입니다. 한 틱(1X 에서 약 4 ms) 안에서는 새 응답이 도착하지 않습니다.

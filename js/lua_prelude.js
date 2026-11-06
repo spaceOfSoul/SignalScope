@@ -295,5 +295,126 @@ do
     end }
   end
 end
+
+-- ===== 네트워크 (HTTP fetch / WebSocket) =====
+--  시뮬레이션 시계는 네트워크 대기와 무관하게 계속 흐른다. 응답을 기다리는 동안의 출력은 스크립트가 정한다.
+--   * 비동기형: req = http_request(url) → req:ready() / req:result(),   ws:poll() / ws:available()
+--   * 대기형  : http_get(), http_post(), req:wait(), ws:recv(), ws_open()
+--               delay() 처럼 잠들어 기다린다 (그동안 출력은 마지막 값 유지). timeout = 시뮬레이션 시간(초)
+--   * net_timeout = HTTP 응답 제한 (실제 시간, 초, 기본 15) — 서버가 멈췄을 때의 안전장치
+--   * 데이터는 바이트 그대로 (텍스트/바이너리 모두 손실 없음)
+do
+  local hstart, hready, htake, hcancel, nwait = __http_start, __http_ready, __http_take, __http_cancel, __net_wait
+
+  local Req = {}
+  Req.__index = Req
+  Req.__name = "HttpRequest"
+  Req.__tostring = function(r) return "http request (" .. r.url .. ")" end
+
+  function http_request(url, o)
+    if type(url) == "table" then o = url; url = o.url end
+    if url == nil then error("bad argument #1 to 'http_request' (url expected)", 2) end
+    o = o or {}
+    local method = o.method or ((o.body ~= nil) and "POST" or "GET")
+    local headers = o.headers
+    if o.content_type then
+      local h = {}
+      if headers then for k, v in pairs(headers) do h[k] = v end end
+      h["Content-Type"] = o.content_type
+      headers = h
+    end
+    local body = nil
+    if o.body ~= nil then body = tostring(o.body) end
+    local id = hstart(tostring(url), method, body, headers, o.net_timeout)
+    return setmetatable({ _id = id, url = tostring(url) }, Req)
+  end
+  function Req:ready()
+    if self._done then return true end
+    return hready(self._id)
+  end
+  -- 완료 시: body, status, headers  |  실패 시: nil, 오류 메시지  |  미완료: nil, "pending"
+  function Req:result()
+    if not self._done then
+      if not hready(self._id) then return nil, "pending" end
+      self._body, self._status, self._headers = htake(self._id)
+      self._done = true
+    end
+    return self._body, self._status, self._headers
+  end
+  function Req:wait(timeout)
+    if not self._done and not hready(self._id) then
+      if not nwait("http", self._id, timeout) then return nil, "timeout" end
+    end
+    return self:result()
+  end
+  function Req:cancel()
+    if not self._done then
+      hcancel(self._id)
+      self._done = true
+      self._body, self._status, self._headers = nil, "cancelled", nil
+    end
+    return true
+  end
+  function http_get(url, o)
+    local r = http_request(url, o)
+    local body, st, h = r:wait(o and o.timeout)
+    if body == nil and st == "timeout" then r:cancel() end
+    return body, st, h
+  end
+  function http_post(url, body, o)
+    local p = {}
+    if o then for k, v in pairs(o) do p[k] = v end end
+    p.method = p.method or "POST"
+    if body == nil then body = "" end
+    p.body = body
+    return http_get(url, p)
+  end
+
+  local wopen, wstate, werr, wavail, wpoll, wsend, wclose, wdropped =
+        __ws_open, __ws_state, __ws_error, __ws_available, __ws_poll, __ws_send, __ws_close, __ws_dropped
+  local WS = {}
+  WS.__index = WS
+  WS.__name = "WebSocket"
+  WS.__tostring = function(s) return "websocket (" .. s.url .. ", " .. wstate(s._id) .. ")" end
+
+  -- 기본: 연결될 때까지 대기 (o.wait = false 이면 즉시 반환, 연결 전 send 는 연결 후 전송)
+  function ws_open(url, o)
+    o = o or {}
+    local id = wopen(tostring(url), o.protocols)
+    local s = setmetatable({ _id = id, url = tostring(url) }, WS)
+    if o.wait == false then return s end
+    if not nwait("ws_open", id, o.timeout) then wclose(id); return nil, "timeout" end
+    if wstate(id) ~= "open" then
+      local e = werr(id) or "connection failed"
+      wclose(id)
+      return nil, e
+    end
+    return s
+  end
+  function WS:state() return wstate(self._id) end
+  function WS:error() return werr(self._id) end
+  function WS:available() return wavail(self._id) end
+  function WS:dropped() return wdropped(self._id) end
+  function WS:poll() return wpoll(self._id) end
+  function WS:send(data, mode) return wsend(self._id, data, mode) end
+  -- 메시지 1개 수신 (대기형): msg  |  nil, "timeout"  |  nil, "closed"
+  function WS:recv(timeout)
+    local m = wpoll(self._id)
+    if m ~= nil then return m end
+    local st = wstate(self._id)
+    if st == "closed" or st == "closing" then return nil, "closed" end
+    if not nwait("ws_msg", self._id, timeout) then return nil, "timeout" end
+    m = wpoll(self._id)
+    if m ~= nil then return m end
+    return nil, "closed"
+  end
+  function WS:close(code, reason) wclose(self._id, code, reason) return true end
+  function ws_send(s, ...) return s:send(...) end
+  function ws_recv(s, ...) return s:recv(...) end
+  function ws_poll(s) return s:poll() end
+  function ws_available(s) return s:available() end
+  function ws_state(s) return s:state() end
+  function ws_close(s, ...) return s:close(...) end
+end
 `;
 })(typeof window !== 'undefined' ? window : globalThis);
