@@ -53,6 +53,7 @@ architecture:
     - js/ui_editor.js
     - js/examples.js
     - js/ui_pins.js
+    - js/api_doc.js
     - js/ui_script.js
     - js/scope_view.js
     - js/scope_view_xy.js
@@ -111,6 +112,11 @@ files:
     role: topbar/desktop 컨테이너, CSS 연결, VM과 프로젝트 JS의 순차 로딩
     kind: entrypoint
     related: [css/style.css, js/main.js]
+  api.html:
+    role: Lua API 별도 문서 페이지. API 도움말 탭의 링크로 새 탭에서 열며 넓은 화면에서는 함수/설명을 고정 2열로 표시
+    kind: documentation
+    related: [js/api_doc.js, css/style.css, js/ui_script.js]
+    note: 내용은 js/api_doc.js에서 가져오므로 이 파일에 API 항목을 직접 쓰지 않는다. js/api_doc.js와 css/style.css만 로드한다.
   .gitignore:
     role: Git 제외 규칙. Python 테스트가 tools 모듈을 불러올 때 생기는 __pycache__/ 를 제외한다.
     kind: configuration
@@ -214,14 +220,21 @@ files:
     symbols: [PinsWindow]
     methods: [PinsWindow.toggleProbe, PinsWindow.swap, PinsWindow.applyFilter, PinsWindow.refresh, PinsWindow.live]
     depends_on: [js/ui_controls.js, js/util.js, js/sim.js]
+  js/api_doc.js:
+    role: Lua API 도움말 내용(API_DOC)과 렌더러. 창 2의 API 도움말 탭과 api.html이 함께 사용
+    kind: documentation_data
+    exports: [VS.renderApiDoc]
+    symbols: [API_DOC, HINT]
+    related: [api.html, js/ui_script.js, css/style.css]
+    note: api.html에서도 단독으로 로드되므로 VS.ui 등 다른 스크립트에 의존하지 않는다.
   js/ui_script.js:
     role: 창 2. 편집/실행, CLK/CPI, Pause/속도, 콘솔, PC/VFS 파일 관리, 예제 선택, API 도움말(네트워크 포함), 네트워크 대기 상태 표시
     kind: ui
     exports: [VS.ui.ScriptWindow]
-    symbols: [ScriptWindow, API_DOC, CLK_LIST, CPI_LIST]
+    symbols: [ScriptWindow, CLK_LIST, CPI_LIST]
     methods: [ScriptWindow.run, ScriptWindow.loadExample, ScriptWindow.renderFiles, ScriptWindow.openFromPC, ScriptWindow.saveToPC, ScriptWindow.updateState, ScriptWindow.tick]
     note: tick이 LuaRuntime.waitInfo를 읽어 대기가 0.4 s를 넘으면 상태 표시에 'RUNNING · HTTP 응답 대기' 등을 붙인다.
-    depends_on: [js/ui_controls.js, js/ui_editor.js, js/examples.js, js/sim.js, js/util.js]
+    depends_on: [js/ui_controls.js, js/ui_editor.js, js/examples.js, js/api_doc.js, js/sim.js, js/util.js]
   js/scope_view.js:
     role: Y-T Canvas 화면, 10×8 눈금, min/max 축약 파형, 마커, 측정, Zoom/드래그 및 XY 입력 분기
     kind: rendering
@@ -416,9 +429,9 @@ change_routes:
     read: [js/sim.js, js/lua_runtime.js, js/main.js]
     test_sections: [6, 7, 8, 9, 11]
   - task: Lua API 추가 또는 파일 입출력 동작 수정
-    read: [js/lua_runtime.js, js/lua_prelude.js, js/vfs.js, js/ui_script.js, js/ui_editor.js]
+    read: [js/lua_runtime.js, js/lua_prelude.js, js/vfs.js, js/api_doc.js, js/ui_editor.js]
     test_sections: [6, 7, 10]
-    note: API_DOC 도움말, 편집기 API 강조 목록 및 README API 안내도 함께 확인한다.
+    note: js/api_doc.js의 도움말, 편집기 API 강조 목록 및 README API 안내도 함께 확인한다.
   - task: HTTP/WebSocket 통신 또는 외부 응답 대기 수정
     read: [js/net.js, js/lua_runtime.js, js/lua_prelude.js, js/sim.js, js/ui_script.js]
     test_sections: [6, 7, 10, 12]
