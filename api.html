@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SignalScope Lua API</title>
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    html, body { height: auto; overflow: auto; }
+    .help { max-width: 1120px; margin: 0 auto; padding: 16px; font-size: 13px; }
+    .help h1 { margin: 0 0 6px; font-size: 18px; }
+    .help h4 { margin: 18px 0 4px; font-size: 14px; }
+    .help-row { padding: 5px 0; }
+    /* 넓은 화면: 모든 섹션이 같은 열 폭을 써서 설명 시작 위치가 일정하다. 좁은 화면은 style.css 의 위아래 배치 */
+    @media (min-width: 760px) {
+      .help-row { display: grid; grid-template-columns: 400px minmax(0, 1fr); column-gap: 16px; }
+      .help dd { margin: 0; }
+    }
+  </style>
+</head>
+<body>
+  <main class="help" id="doc">
+    <h1>SignalScope Lua API</h1>
+  </main>
+  <script src="js/api_doc.js"></script>
+  <script>VS.renderApiDoc(document.getElementById('doc'));</script>
+</body>
+</html>

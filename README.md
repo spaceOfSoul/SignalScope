@@ -223,7 +223,7 @@ local req = http_request(url)  req:ready()  req:result()  req:wait(0.1)   http_g
 local ws = ws_open(url)  ws:send(s)  ws:recv(0.1)  ws:poll()  ws:available()  ws:state()  ws:close()
 ```
 
-전체 목록은 창 2 의 **API 도움말** 탭을 참고하세요.
+전체 목록은 창 2 의 **API 도움말** 탭 또는 별도 문서 [`api.html`](api.html) (탭의 **새 탭에서 크게 보기** 링크)를 참고하세요.
 
 ### 예제 (창 2 ▸ 예제 불러오기 / `examples/*.lua`)
 예제를 불러오면 권장 프로브/스코프 설정이 함께 적용됩니다.
@@ -253,6 +253,7 @@ local ws = ws_open(url)  ws:send(s)  ws:recv(0.1)  ws:poll()  ws:available()  ws
 
 ```
 index.html            진입점
+api.html              Lua API 문서 (앱 옆에 띄워 두는 별도 페이지)
 css/style.css         스타일
 lib/fengari-web.js    Lua 5.3 VM (MIT, lib/fengari-web.LICENSE.txt)
 js/util.js            단위 포맷/파싱 등 공용 유틸
@@ -267,6 +268,7 @@ js/sim.js             시뮬레이션 엔진 (Simulation Clock, 속도, Pause)
 js/scope_view.js      오실로스코프 화면 렌더링/마우스 조작 (Y-T)
 js/scope_view_xy.js   XY 모드 화면 (Line/Dot/Persistence, 축 눈금/0 V 기준선, Zoom/오버뷰, 표시 중단 안내)
 js/ui_*.js, main.js   창/컨트롤/편집기/앱 구성
+js/api_doc.js         Lua API 도움말 내용 (API 도움말 탭과 api.html 공용)
 examples/*.lua        예제 스크립트
 tools/signal_server.py  데이터 서버 (HTTP API + WebSocket + UDP/TCP 중계, parquet/데모 프레임)
 tests/test.html       코어 테스트 (브라우저로 열면 결과 표시)
